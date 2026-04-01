@@ -1387,7 +1387,7 @@ gs.current.localMode = localMode;
       const mag = Math.hypot(ax, ay);
       if (mag > 1) { ax /= mag; ay /= mag; }
 
-      // ── Server mode: send input, skip all local physics ──
+      // ── Server mode: send input, run local prediction, skip authoritative physics ──
       if (serverMode && serverConn) {
         serverConn.send({ type: "input", ax, ay, kick: kickHeld });
         // Interpolate remote players toward server positions
@@ -1397,13 +1397,24 @@ gs.current.localMode = localMode;
             rp.y += (rp.targetY - rp.y) * 0.3;
           }
         });
-        // Local player prediction: apply input locally for responsiveness
-        p.vx = (p.vx + ax * PLAYER_ACCEL) * PLAYER_FRICTION;
-        p.vy = (p.vy + ay * PLAYER_ACCEL) * PLAYER_FRICTION;
+        // Local player prediction
+        const distToBall = Math.hypot(p.x - ball.x, p.y - ball.y);
+        const ballProximity = Math.max(0, 1 - (distToBall - KICK_RANGE) / (KICK_RANGE * 2.5));
+        const accel = PLAYER_ACCEL * (1 - ballProximity * 0.45);
+        p.vx = (p.vx + ax * accel) * PLAYER_FRICTION;
+        p.vy = (p.vy + ay * accel) * PLAYER_FRICTION;
         p.x += p.vx; p.y += p.vy;
         p.x = clamp(p.x, PLAYER_RADIUS, PITCH_WIDTH - PLAYER_RADIUS);
         p.y = clamp(p.y, PLAYER_RADIUS, PITCH_HEIGHT - PLAYER_RADIUS);
-        // Particles + rendering still run
+        // Client-side ball collision for instant feedback (server corrects via snapshot)
+        g.lastKickFrame = (g.lastKickFrame || 0) + 1;
+        g.lastDribbleFrame = (g.lastDribbleFrame || 0) + 1;
+        const res = playerBallCollision(p, ball, kickPower, []);
+        if (res === 2) { g.kickBuffer = 0; if (g.lastKickFrame > 8) { playKick(); hapticKick(); g.lastKickFrame = 0; } }
+        else if (res === 1 && g.lastDribbleFrame > 12) { playDribble(); g.lastDribbleFrame = 0; }
+        // Run local ball physics so the ball moves after being hit
+        tickBall(ball);
+        // Particles + rendering
         tickParticles(g.particles);
         if (g.goalFlash > 0) g.goalFlash--;
         if (g.goalCooldown > 0) g.goalCooldown--;
