@@ -1032,16 +1032,8 @@ gs.current.localMode = localMode;
         }
       }
 
-      // Latency sampling — skip spectators (they broadcast every 2s, not indicative)
-      let maxAge = 0, sampled = 0;
-      const now = Date.now();
-      states.forEach((state, id) => {
-        if (sampled >= 3) return;
-        if (id === localID) return;
-        if (state?.spectator || state?.team === "spectator") return;
-        if (state?._ts) { maxAge = Math.max(maxAge, now - state._ts); sampled++; }
-      });
-      gs.current.connQuality = sampled === 0 ? "ok" : maxAge < 350 ? "ok" : maxAge < 800 ? "poor" : "bad";
+      // Connection quality — based on how recently we received any update (local clock only, no skew)
+      gs.current._lastAwarenessUpdate = Date.now();
     };
 
     const handle = () => {
@@ -1468,8 +1460,16 @@ gs.current.localMode = localMode;
         }
       }
 
-      // ── Broadcast ──
+      // ── Connection quality (local clock — no cross-machine skew) ──
       const now = Date.now();
+      if (!localMode && g.remotePlayers.size > 0) {
+        const age = now - (g._lastAwarenessUpdate || now);
+        g.connQuality = age < 400 ? "ok" : age < 1200 ? "poor" : "bad";
+      } else if (!localMode) {
+        g.connQuality = "ok";
+      }
+
+      // ── Broadcast ──
       if (isSpectator && !localMode && now - g.lastBroadcast > 2000) {
         awareness.setLocalState({ spectator: true, _ts: now });
         g.lastBroadcast = now;
