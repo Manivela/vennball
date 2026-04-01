@@ -1479,10 +1479,8 @@ gs.current.localMode = localMode;
           g._localKickGuard = Date.now(); // ignore incoming ball updates briefly
           g.lastBroadcast = 0; // force immediate broadcast so host sees the kick
         }
-        else if (localRes >= 1) {
-          if (g.ballTarget) { g.ballTarget.x = ball.x; g.ballTarget.y = ball.y; g.ballTarget.vx = ball.vx; g.ballTarget.vy = ball.vy; }
-          g._localKickGuard = Date.now();
-          if (localRes === 1 && g.lastDribbleFrame > 12) { playDribble(); g.lastDribbleFrame = 0; }
+        else if (localRes === 1) {
+          if (g.lastDribbleFrame > 12) { playDribble(); g.lastDribbleFrame = 0; }
         }
 
         // All clients run remote player ball collisions (prevents ball phasing through players).
