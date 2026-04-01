@@ -29,4 +29,4 @@ export const BALL_MAX_SPEED = 14;
 export const COLLISION_RESTITUTION = 0.7;
 
 // Net sync
-export const BROADCAST_INTERVAL = 33; // ~30fps
+export const BROADCAST_INTERVAL = 50; // ~20fps — interpolation fills gaps

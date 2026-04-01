@@ -172,7 +172,9 @@ function spawnGoalParticles(particles, x, y, teamColor) {
 }
 
 function tickParticles(particles) {
-  for (let i = particles.length - 1; i >= 0; i--) {
+  // Swap-and-pop removal — O(n) instead of O(n²) from splice
+  let i = 0;
+  while (i < particles.length) {
     const p = particles[i];
     p.x += p.vx;
     p.y += p.vy;
@@ -180,7 +182,12 @@ function tickParticles(particles) {
     p.vy *= 0.96;
     p.vy += 0.04;
     p.life--;
-    if (p.life <= 0) particles.splice(i, 1);
+    if (p.life <= 0) {
+      particles[i] = particles[particles.length - 1];
+      particles.pop();
+    } else {
+      i++;
+    }
   }
 }
 
@@ -846,6 +853,7 @@ export default function Game({ localMode = false }) {
     slowMoFrames: 0,
     lastKickFrame: 0,
     connQuality: "ok",
+    cachedHostID: null,
     spectator: false,
     charge: 0,
     wasKicking: false,
@@ -922,20 +930,27 @@ gs.current.localMode = localMode;
   }, [navigate]);
 
   // Awareness listener — remote players + ball reconciliation
+  // Debounced: awareness fires per-peer, so with 10 players we'd get 10 events
+  // in quick succession. Batching into one rAF pass avoids redundant work.
   useEffect(() => {
     if (!awareness || localMode) return;
+    let pending = false;
 
-    const handle = () => {
+    const flush = () => {
+      pending = false;
       const states = awareness.getStates();
       const localID = awareness.clientID;
-      const remote = new Map();
+      const remote = gs.current.remotePlayers;
+
+      // Track which IDs are still present so we can prune stale ones
+      const seen = new Set();
 
       states.forEach((state, id) => {
         if (id === localID || !state?.team || state.team === "spectator" || state.spectator) return;
+        seen.add(id);
 
-        const existing = gs.current.remotePlayers.get(id);
+        const existing = remote.get(id);
         if (existing) {
-          // Lerp target
           existing.targetX = state.x;
           existing.targetY = state.y;
           existing.vx = state.vx || 0;
@@ -944,7 +959,6 @@ gs.current.localMode = localMode;
           existing.name = state.name;
           existing.kicking = state.kicking;
           existing.charging = state.charging || 0;
-          remote.set(id, existing);
         } else {
           remote.set(id, {
             x: state.x,
@@ -961,21 +975,32 @@ gs.current.localMode = localMode;
         }
       });
 
-      gs.current.remotePlayers = remote;
+      // Remove players who left — iterate only when sizes differ
+      if (remote.size !== seen.size) {
+        remote.forEach((_, id) => { if (!seen.has(id)) remote.delete(id); });
+      }
 
+      // Cache host ID
       let hostID = localID;
       states.forEach((state, id) => {
         if (state?.team && state.team !== "spectator" && id < hostID) hostID = id;
       });
+      gs.current.cachedHostID = hostID;
 
       if (hostID !== localID) {
         const hostState = states.get(hostID);
         if (hostState?.ball) {
-          // Store as target — game loop will interpolate per-frame
-          gs.current.ballTarget = { ...hostState.ball };
+          const bt = gs.current.ballTarget;
+          if (bt) {
+            bt.x = hostState.ball.x; bt.y = hostState.ball.y;
+            bt.vx = hostState.ball.vx; bt.vy = hostState.ball.vy;
+          } else {
+            gs.current.ballTarget = { x: hostState.ball.x, y: hostState.ball.y, vx: hostState.ball.vx, vy: hostState.ball.vy };
+          }
         }
         if (hostState?.score) {
-          gs.current.score = { ...hostState.score };
+          gs.current.score.red = hostState.score.red;
+          gs.current.score.blue = hostState.score.blue;
         }
         if (hostState?.timeLeft !== undefined) gs.current.timeLeft = hostState.timeLeft;
         if (hostState?.half !== undefined) gs.current.half = hostState.half;
@@ -998,16 +1023,21 @@ gs.current.localMode = localMode;
         }
       }
 
-      // Latency: measure age of newest remote timestamp
-      let maxAge = 0, peerCount = 0;
+      // Latency sampling — check only a few peers, not all
+      let maxAge = 0, sampled = 0;
       const now = Date.now();
       states.forEach((state, id) => {
-        if (id === localID && state?._ts) return;
-        if (state?._ts) { maxAge = Math.max(maxAge, now - state._ts); peerCount++; }
+        if (sampled >= 3) return; // sample up to 3 peers
+        if (id === localID) return;
+        if (state?._ts) { maxAge = Math.max(maxAge, now - state._ts); sampled++; }
       });
-      if (peerCount > 0) {
+      if (sampled > 0) {
         gs.current.connQuality = maxAge < 200 ? "ok" : maxAge < 600 ? "poor" : "bad";
       }
+    };
+
+    const handle = () => {
+      if (!pending) { pending = true; queueMicrotask(flush); }
     };
 
     awareness.on("change", handle);
@@ -1107,13 +1137,9 @@ gs.current.localMode = localMode;
       const p = g.localPlayer;
       const ball = g.ball;
 
-      // ── Determine host ──
+      // ── Determine host (cached — updated by awareness listener) ──
       const localID = awareness.clientID;
-      const allStates = awareness.getStates();
-      let hostID = localID;
-      allStates.forEach((state, id) => {
-        if (state?.team && state.team !== "spectator" && id < hostID) hostID = id;
-      });
+      const hostID = g.cachedHostID ?? localID;
       const isHost = localMode || (localID === hostID && !g.spectator);
       const isSpectator = g.spectator;
 
@@ -1251,8 +1277,19 @@ gs.current.localMode = localMode;
       // ── Interpolate remote players (online only — local mode players move directly) ──
       if (!localMode) {
         g.remotePlayers.forEach((rp) => {
-          rp.x += (rp.targetX - rp.x) * 0.25;
-          rp.y += (rp.targetY - rp.y) * 0.25;
+          // Advance target by velocity (predicts position between broadcasts)
+          rp.targetX += rp.vx;
+          rp.targetY += rp.vy;
+          rp.vx *= PLAYER_FRICTION;
+          rp.vy *= PLAYER_FRICTION;
+          // Clamp target to pitch bounds
+          if (rp.targetX < PLAYER_RADIUS) rp.targetX = PLAYER_RADIUS;
+          else if (rp.targetX > PITCH_WIDTH - PLAYER_RADIUS) rp.targetX = PITCH_WIDTH - PLAYER_RADIUS;
+          if (rp.targetY < PLAYER_RADIUS) rp.targetY = PLAYER_RADIUS;
+          else if (rp.targetY > PITCH_HEIGHT - PLAYER_RADIUS) rp.targetY = PITCH_HEIGHT - PLAYER_RADIUS;
+          // Lerp toward predicted position
+          rp.x += (rp.targetX - rp.x) * 0.3;
+          rp.y += (rp.targetY - rp.y) * 0.3;
         });
       }
 
@@ -1328,8 +1365,10 @@ gs.current.localMode = localMode;
           }
         }
       } else {
-        // Build teammates list for passing assist
-        const allPlayers = [p];
+        // Build teammates list — reuse array to avoid GC pressure
+        const allPlayers = g._allPlayersBuf || (g._allPlayersBuf = []);
+        allPlayers.length = 0;
+        allPlayers.push(p);
         g.remotePlayers.forEach((rp) => allPlayers.push(rp));
 
         const getTeammates = (pl, plTeam) =>
@@ -1350,9 +1389,17 @@ gs.current.localMode = localMode;
           });
         }
 
-        for (let i = 0; i < allPlayers.length; i++) {
-          for (let j = i + 1; j < allPlayers.length; j++) {
-            resolveCircleCollision(allPlayers[i], PLAYER_RADIUS, allPlayers[j], PLAYER_RADIUS);
+        // Player-player collision: host runs all pairs; clients only resolve local vs others
+        if (isHost || localMode) {
+          for (let i = 0; i < allPlayers.length; i++) {
+            for (let j = i + 1; j < allPlayers.length; j++) {
+              resolveCircleCollision(allPlayers[i], PLAYER_RADIUS, allPlayers[j], PLAYER_RADIUS);
+            }
+          }
+        } else {
+          // Client: only resolve local player against others (prevents overlap on screen)
+          for (let j = 1; j < allPlayers.length; j++) {
+            resolveCircleCollision(p, PLAYER_RADIUS, allPlayers[j], PLAYER_RADIUS);
           }
         }
 
@@ -1394,18 +1441,20 @@ gs.current.localMode = localMode;
         g.lastBroadcast = now;
       }
       if (!localMode && !isSpectator && now - g.lastBroadcast > BROADCAST_INTERVAL) {
-        const state = {
-          x: p.x,
-          y: p.y,
-          vx: p.vx,
-          vy: p.vy,
-          team,
-          name: currentUser?.name,
-          kicking: kickPower,
-          charging: kickHeld ? g.charge / CHARGE_MAX : 0,
-        };
+        // Reuse broadcast object to avoid allocation every interval
+        const state = g._broadcastBuf || (g._broadcastBuf = {});
+        state.x = p.x;
+        state.y = p.y;
+        state.vx = p.vx;
+        state.vy = p.vy;
+        state.team = team;
+        state.name = currentUser?.name;
+        state.kicking = kickPower;
+        state.charging = kickHeld ? g.charge / CHARGE_MAX : 0;
         if (isHost) {
-          state.ball = { x: ball.x, y: ball.y, vx: ball.vx, vy: ball.vy };
+          if (!state.ball) state.ball = {};
+          state.ball.x = ball.x; state.ball.y = ball.y;
+          state.ball.vx = ball.vx; state.ball.vy = ball.vy;
           state.score = g.score;
           state.timeLeft = g.timeLeft;
           state.half = g.half;
@@ -1415,6 +1464,10 @@ gs.current.localMode = localMode;
           state.goalFlash = g.goalFlash;
           state.lastGoalTeam = g.lastGoalTeam;
           state.goalCooldown = g.goalCooldown;
+        } else {
+          // Clear host fields when not host (in case host changed)
+          state.ball = undefined;
+          state.score = undefined;
         }
         state._ts = Date.now();
         awareness.setLocalState(state);
