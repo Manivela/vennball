@@ -980,12 +980,21 @@ gs.current.localMode = localMode;
         remote.forEach((_, id) => { if (!seen.has(id)) remote.delete(id); });
       }
 
-      // Cache host ID
+      // Cache host ID — detect host migration
       let hostID = localID;
       states.forEach((state, id) => {
         if (state?.team && state.team !== "spectator" && id < hostID) hostID = id;
       });
+      const prevHost = gs.current.cachedHostID;
       gs.current.cachedHostID = hostID;
+
+      // Host migration: we just became host (old host left or we're lowest ID now)
+      if (hostID === localID && prevHost !== null && prevHost !== localID) {
+        // Clear ballTarget so game loop switches from interpolation to running physics
+        gs.current.ballTarget = null;
+        // Force immediate broadcast so other clients pick up the new host
+        gs.current.lastBroadcast = 0;
+      }
 
       if (hostID !== localID) {
         const hostState = states.get(hostID);
@@ -1032,7 +1041,7 @@ gs.current.localMode = localMode;
         if (state?._ts) { maxAge = Math.max(maxAge, now - state._ts); sampled++; }
       });
       if (sampled > 0) {
-        gs.current.connQuality = maxAge < 200 ? "ok" : maxAge < 600 ? "poor" : "bad";
+        gs.current.connQuality = maxAge < 350 ? "ok" : maxAge < 800 ? "poor" : "bad";
       }
     };
 
@@ -1426,9 +1435,14 @@ gs.current.localMode = localMode;
           t.y += t.vy;
           t.vx *= BALL_FRICTION;
           t.vy *= BALL_FRICTION;
+          // Wall bounces on predicted target (prevents clipping between updates)
+          if (t.y - BALL_RADIUS < 0) { t.y = BALL_RADIUS; t.vy = Math.abs(t.vy) * COLLISION_RESTITUTION; }
+          if (t.y + BALL_RADIUS > PITCH_HEIGHT) { t.y = PITCH_HEIGHT - BALL_RADIUS; t.vy = -Math.abs(t.vy) * COLLISION_RESTITUTION; }
+          if (t.x - BALL_RADIUS < 0 && !(t.y > GOAL_TOP && t.y < GOAL_BOT)) { t.x = BALL_RADIUS; t.vx = Math.abs(t.vx) * COLLISION_RESTITUTION; }
+          if (t.x + BALL_RADIUS > PITCH_WIDTH && !(t.y > GOAL_TOP && t.y < GOAL_BOT)) { t.x = PITCH_WIDTH - BALL_RADIUS; t.vx = -Math.abs(t.vx) * COLLISION_RESTITUTION; }
           // Smoothly lerp ball toward predicted target
-          ball.x += (t.x - ball.x) * 0.3;
-          ball.y += (t.y - ball.y) * 0.3;
+          ball.x += (t.x - ball.x) * 0.35;
+          ball.y += (t.y - ball.y) * 0.35;
           ball.vx = t.vx;
           ball.vy = t.vy;
         }
