@@ -1552,6 +1552,16 @@ gs.current.localMode = localMode;
         }
       }
 
+      // ── Hard clamp ball to pitch (safety net after all collisions) ──
+      if (!g.pendingReset) {
+        const inLeftGoal = ball.x < 0 && ball.y > GOAL_TOP && ball.y < GOAL_BOT;
+        const inRightGoal = ball.x > PITCH_WIDTH && ball.y > GOAL_TOP && ball.y < GOAL_BOT;
+        if (!inLeftGoal && !inRightGoal) {
+          ball.x = clamp(ball.x, BALL_RADIUS, PITCH_WIDTH - BALL_RADIUS);
+        }
+        ball.y = clamp(ball.y, BALL_RADIUS, PITCH_HEIGHT - BALL_RADIUS);
+      }
+
       // ── Connection quality (local clock — no cross-machine skew) ──
       const now = Date.now();
       if (!localMode && g.remotePlayers.size > 0) {
