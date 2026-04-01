@@ -1,3 +1,4 @@
+import { createServer } from "http";
 import { WebSocketServer } from "ws";
 import {
   PITCH_WIDTH, PITCH_HEIGHT, PLAYER_RADIUS, BALL_RADIUS, PLAYER_ACCEL,
@@ -10,7 +11,11 @@ const PORT = process.env.PORT || 4444;
 const TICK_MS = 1000 / 60;     // 60 fps physics
 const BROADCAST_MS = 50;       // 20 Hz snapshots to clients
 
-const wss = new WebSocketServer({ host: "0.0.0.0", port: PORT });
+// HTTP server for Fly.io health checks + WebSocket upgrade
+const server = createServer((req, res) => {
+  res.writeHead(200); res.end("ok");
+});
+const wss = new WebSocketServer({ server });
 const rooms = new Map();
 
 // ── Room state ──────────────────────────────────────────────────
@@ -291,4 +296,6 @@ wss.on("connection", (ws, req) => {
   });
 });
 
-console.log(`Game server on ws://localhost:${PORT} (60fps physics, ${BROADCAST_MS}ms snapshots)`);
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`Game server on ws://0.0.0.0:${PORT} (60fps physics, ${BROADCAST_MS}ms snapshots)`);
+});
