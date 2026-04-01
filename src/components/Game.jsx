@@ -1,6 +1,6 @@
 import { useRef, useEffect, useState } from "react";
 import { useParams, useNavigate, useSearchParams } from "react-router-dom";
-import { useWebRtcProvider } from "../hooks/useWebRtc";
+import { useRelayProvider } from "../hooks/useRelay";
 import TouchControls from "./TouchControls";
 import { useAuthStore } from "../hooks/useStore";
 import {
@@ -879,7 +879,7 @@ export default function Game({ localMode = false }) {
     if (!localMode && !currentUser) navigate("/");
   }, [currentUser, navigate]); // eslint-disable-line
 
-  const rtc = useWebRtcProvider(localMode ? null : roomId);
+  const rtc = useRelayProvider(localMode ? null : roomId);
   const mockAwareness = useRef({
     clientID: 1,
     getStates: () => new Map(),
