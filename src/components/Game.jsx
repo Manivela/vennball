@@ -1041,9 +1041,7 @@ gs.current.localMode = localMode;
         if (state?.spectator || state?.team === "spectator") return;
         if (state?._ts) { maxAge = Math.max(maxAge, now - state._ts); sampled++; }
       });
-      if (sampled > 0) {
-        gs.current.connQuality = maxAge < 350 ? "ok" : maxAge < 800 ? "poor" : "bad";
-      }
+      gs.current.connQuality = sampled === 0 ? "ok" : maxAge < 350 ? "ok" : maxAge < 800 ? "poor" : "bad";
     };
 
     const handle = () => {
