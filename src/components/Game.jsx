@@ -1531,31 +1531,29 @@ gs.current.localMode = localMode;
             hapticGoal();
           }
         } else if (g.ballTarget) {
-          // Client: run local ball physics (walls, friction) for prediction
-          ball.vx *= BALL_FRICTION;
-          ball.vy *= BALL_FRICTION;
-          ball.x += ball.vx;
-          ball.y += ball.vy;
-          // Wall bounces
-          if (ball.y - BALL_RADIUS < 0) { ball.y = BALL_RADIUS; ball.vy = Math.abs(ball.vy) * COLLISION_RESTITUTION; }
-          if (ball.y + BALL_RADIUS > PITCH_HEIGHT) { ball.y = PITCH_HEIGHT - BALL_RADIUS; ball.vy = -Math.abs(ball.vy) * COLLISION_RESTITUTION; }
-          if (ball.x - BALL_RADIUS < 0 && !(ball.y > GOAL_TOP && ball.y < GOAL_BOT)) { ball.x = BALL_RADIUS; ball.vx = Math.abs(ball.vx) * COLLISION_RESTITUTION; }
-          if (ball.x + BALL_RADIUS > PITCH_WIDTH && !(ball.y > GOAL_TOP && ball.y < GOAL_BOT)) { ball.x = PITCH_WIDTH - BALL_RADIUS; ball.vx = -Math.abs(ball.vx) * COLLISION_RESTITUTION; }
-          // Advance host target with same physics
+          // Client: run full local ball physics (same as host)
+          tickBall(ball);
+
+          // Dead-zone reconciliation: only correct when host disagrees significantly
           const t = g.ballTarget;
-          t.x += t.vx;
-          t.y += t.vy;
-          t.vx *= BALL_FRICTION;
-          t.vy *= BALL_FRICTION;
-          if (t.y - BALL_RADIUS < 0) { t.y = BALL_RADIUS; t.vy = Math.abs(t.vy) * COLLISION_RESTITUTION; }
-          if (t.y + BALL_RADIUS > PITCH_HEIGHT) { t.y = PITCH_HEIGHT - BALL_RADIUS; t.vy = -Math.abs(t.vy) * COLLISION_RESTITUTION; }
-          if (t.x - BALL_RADIUS < 0 && !(t.y > GOAL_TOP && t.y < GOAL_BOT)) { t.x = BALL_RADIUS; t.vx = Math.abs(t.vx) * COLLISION_RESTITUTION; }
-          if (t.x + BALL_RADIUS > PITCH_WIDTH && !(t.y > GOAL_TOP && t.y < GOAL_BOT)) { t.x = PITCH_WIDTH - BALL_RADIUS; t.vx = -Math.abs(t.vx) * COLLISION_RESTITUTION; }
-          // Reconcile: pull local prediction toward host authority
-          ball.x += (t.x - ball.x) * 0.15;
-          ball.y += (t.y - ball.y) * 0.15;
-          ball.vx += (t.vx - ball.vx) * 0.15;
-          ball.vy += (t.vy - ball.vy) * 0.15;
+          // Advance host target with same physics
+          t.vx *= BALL_FRICTION; t.vy *= BALL_FRICTION;
+          t.x += t.vx; t.y += t.vy;
+
+          const posDiff = Math.hypot(t.x - ball.x, t.y - ball.y);
+          if (posDiff > 60) {
+            // Large divergence — hard snap to host
+            ball.x = t.x; ball.y = t.y;
+            ball.vx = t.vx; ball.vy = t.vy;
+          } else if (posDiff > 8) {
+            // Moderate divergence — gentle correction
+            const f = 0.08;
+            ball.x += (t.x - ball.x) * f;
+            ball.y += (t.y - ball.y) * f;
+            ball.vx += (t.vx - ball.vx) * f;
+            ball.vy += (t.vy - ball.vy) * f;
+          }
+          // Small divergence (<8 units) — trust local physics entirely
         }
       }
 
