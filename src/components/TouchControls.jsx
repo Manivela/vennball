@@ -5,7 +5,7 @@ const KNOB_R = 20;
 const MAX_DIST = JOYSTICK_R - KNOB_R;
 const KICK_R = 30;
 
-function useJoystick(elRef, gs, stateKey) {
+function useJoystick(elRef, gs, stateKey, flipped = false) {
   useEffect(() => {
     const el = elRef.current;
     if (!el) return;
@@ -40,7 +40,7 @@ function useJoystick(elRef, gs, stateKey) {
       const dist = Math.hypot(dx, dy);
       if (dist > MAX_DIST) { dx = (dx / dist) * MAX_DIST; dy = (dy / dist) * MAX_DIST; }
       gs.current[stateKey] = { dx: dx / MAX_DIST, dy: dy / MAX_DIST };
-      drawKnob(dx, dy);
+      drawKnob(flipped ? -dx : dx, flipped ? -dy : dy);
     };
 
     const onStart = (e) => {
@@ -140,7 +140,7 @@ export default function TouchControls({ gs, localMode = false }) {
 
   useJoystick(p1JoyRef,  gs, "joystick");
   useKickButton(p1KickRef, gs, "touchKick");
-  useJoystick(p2JoyRef,  gs, "joystick2");
+  useJoystick(p2JoyRef,  gs, "joystick2", true);
   useKickButton(p2KickRef, gs, "touchKick2");
 
   if (localMode) {
