@@ -799,21 +799,8 @@ gs.current.localMode = localMode;
       if (hostID !== localID) {
         const hostState = states.get(hostID);
         if (hostState?.ball) {
-          const b = gs.current.ball;
-          const hb = hostState.ball;
-          // Snap if far, lerp if close
-          const d = Math.hypot(b.x - hb.x, b.y - hb.y);
-          if (d > 50) {
-            b.x = hb.x;
-            b.y = hb.y;
-            b.vx = hb.vx;
-            b.vy = hb.vy;
-          } else {
-            b.x += (hb.x - b.x) * 0.3;
-            b.y += (hb.y - b.y) * 0.3;
-            b.vx = hb.vx;
-            b.vy = hb.vy;
-          }
+          // Store as target — game loop will interpolate per-frame
+          gs.current.ballTarget = { ...hostState.ball };
         }
         if (hostState?.score) {
           gs.current.score = { ...hostState.score };
@@ -1094,11 +1081,9 @@ gs.current.localMode = localMode;
           }
         }
       } else {
-        // Local player-ball
-        playerBallCollision(p, ball, kicking);
-
-        // Remote player-ball (only host resolves authoritatively)
+        // Player-ball collisions (host only — non-host interpolates ball from host)
         if (isHost) {
+          playerBallCollision(p, ball, kicking);
           g.remotePlayers.forEach((rp) => {
             playerBallCollision(rp, ball, rp.kicking);
           });
@@ -1113,16 +1098,27 @@ gs.current.localMode = localMode;
           }
         }
 
-        // Ball tick — only score if not already pending reset
-        const goal = tickBall(ball);
-        if (goal && isHost && !g.pendingReset) {
-          const scorer = g.swapped ? (goal === "red" ? "blue" : "red") : goal;
-          g.score[scorer]++;
-          g.kickedOff = false;
-          g.goalCooldown = 180;
-          g.goalFlash = 60;
-          g.lastGoalTeam = goal;
-          g.pendingReset = true;
+        // Ball tick — host runs physics, non-host interpolates toward host target
+        if (isHost) {
+          const goal = tickBall(ball);
+          if (goal && !g.pendingReset) {
+            const scorer = g.swapped ? (goal === "red" ? "blue" : "red") : goal;
+            g.score[scorer]++;
+            g.kickedOff = false;
+            g.goalCooldown = 180;
+            g.goalFlash = 60;
+            g.lastGoalTeam = goal;
+            g.pendingReset = true;
+          }
+        } else if (g.ballTarget) {
+          // Predict position using host velocity + lerp toward host position
+          const t = g.ballTarget;
+          ball.x += t.vx;
+          ball.y += t.vy;
+          ball.x += (t.x - ball.x) * 0.15;
+          ball.y += (t.y - ball.y) * 0.15;
+          ball.vx = t.vx;
+          ball.vy = t.vy;
         }
       }
 
