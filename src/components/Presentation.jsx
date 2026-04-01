@@ -113,12 +113,12 @@ const slides = [
     img: "/slides/07_goal_scored.png",
   },
   {
-    type: "screenshot",
+    type: "mobile",
     title: "Play on Your Phone",
     subtitle:
-      "On mobile, the pitch rotates to fill your screen. Use the on-screen joystick to move and the KICK button to shoot. In local mode, both players get their own controls.",
-    img: "/slides/09_mobile_portrait.png",
-    tall: true,
+      "On-screen joystick to move, KICK button to shoot. In local mode, the pitch rotates and both players get their own controls.",
+    imgOnline: "/slides/11_mobile_online.png",
+    imgLocal: "/slides/09_mobile_portrait.png",
   },
   {
     type: "screenshot",
@@ -402,6 +402,24 @@ export default function Presentation() {
           </>
         )}
 
+        {slide.type === "mobile" && (
+          <>
+            <h2 style={s.h2}>{slide.title}</h2>
+            <TrophyDivider />
+            <div style={s.sub}>{slide.subtitle}</div>
+            <div style={{ display: "flex", gap: 32, alignItems: "center", justifyContent: "center" }}>
+              <div style={{ textAlign: "center" }}>
+                <img src={slide.imgOnline} alt="Online mobile" style={{ ...s.img, maxHeight: "52vh", maxWidth: 220 }} />
+                <div style={{ color: C.muted, fontSize: 14, marginTop: 8 }}>Online</div>
+              </div>
+              <div style={{ textAlign: "center" }}>
+                <img src={slide.imgLocal} alt="Local mobile" style={{ ...s.img, maxHeight: "52vh", maxWidth: 220 }} />
+                <div style={{ color: C.muted, fontSize: 14, marginTop: 8 }}>Local 1v1</div>
+              </div>
+            </div>
+          </>
+        )}
+
         {slide.type === "modes" && (
           <>
             <h2 style={s.h2}>{slide.title}</h2>
@@ -446,8 +464,10 @@ export default function Presentation() {
             }}>
               {[
                 { val: "1", label: "Developer" },
+                { val: "3", label: "AI Agents" },
                 { val: "6h", label: "Build Time" },
                 { val: "~1500", label: "Lines of Code" },
+                { val: "$80", label: "Total AI Cost" },
                 { val: "0", label: "Servers Needed" },
               ].map((s2) => (
                 <div key={s2.label} style={{ textAlign: "center", minWidth: 120 }}>

@@ -369,6 +369,7 @@ function render(ctx, canvas, g, localTeam, rotated, dpr = 1) {
     g.shakeFrames--;
   }
 
+  const onlinePortrait = rotated && !g.localMode; // online on a portrait device
   // In local mode the score/controls overlay the pitch — no reserved space.
   // In rotated (portrait) mode the HUD/hint land on the sides, not top/bottom,
   // so reserve horizontal space for them instead of vertical.
@@ -469,8 +470,9 @@ function render(ctx, canvas, g, localTeam, rotated, dpr = 1) {
     if (rotated) {
       ctx.save();
       ctx.translate(Math.round(x), Math.round(y));
-      // P1: counter-rotate -90° to undo CSS +90°. P2: +90° so they read it right-side up.
-      ctx.rotate(flipped ? Math.PI / 2 : -Math.PI / 2);
+      // Online portrait: CSS -90°, counter-rotate +90°
+      // Local portrait P1: CSS +90°, counter-rotate -90°. P2: +90° (right-side up for them).
+      ctx.rotate(onlinePortrait ? Math.PI / 2 : (flipped ? Math.PI / 2 : -Math.PI / 2));
       ctx.fillStyle = "#fff";
       ctx.font = `bold ${fontSize}px system-ui`;
       ctx.textAlign = "center";
@@ -518,8 +520,8 @@ function render(ctx, canvas, g, localTeam, rotated, dpr = 1) {
       const barH = 4 * scale;
       let barX, barY;
       if (rotated) {
-        // Rotated: "below" = +X for P1, -X for flipped P2
-        const dir = flippedLabel ? -1 : 1;
+        // Rotated: "below" = +X for local P1 (CSS +90°), -X for online (CSS -90°)
+        const dir = onlinePortrait ? -1 : (flippedLabel ? -1 : 1);
         barX = sx + dir * (r + 5 * scale);
         barY = sy - barW / 2;
         // Draw vertical bar
@@ -527,7 +529,9 @@ function render(ctx, canvas, g, localTeam, rotated, dpr = 1) {
         ctx.fillRect(barX, barY, barH, barW);
         const fill = chargeRatio >= 1 ? "#f1c40f" : chargeRatio > 0.6 ? "#e67e22" : "#2ecc71";
         ctx.fillStyle = fill;
-        if (flippedLabel) {
+        if (onlinePortrait) {
+          ctx.fillRect(barX, barY + barW * (1 - chargeRatio), barH, barW * chargeRatio);
+        } else if (flippedLabel) {
           ctx.fillRect(barX, barY + barW * (1 - chargeRatio), barH, barW * chargeRatio);
         } else {
           ctx.fillRect(barX, barY, barH, barW * chargeRatio);
@@ -552,7 +556,7 @@ function render(ctx, canvas, g, localTeam, rotated, dpr = 1) {
     // Name tag
     if (name) {
       if (rotated) {
-        const offset = flippedLabel ? r + 14 : -(r + 14);
+        const offset = onlinePortrait ? (r + 14) : (flippedLabel ? r + 14 : -(r + 14));
         drawLabel(name, sx + offset, sy, flippedLabel);
       } else {
         drawLabel(name, sx, sy - r - 6);
@@ -596,7 +600,31 @@ function render(ctx, canvas, g, localTeam, rotated, dpr = 1) {
   const timerStr = `${mins}:${String(secs).padStart(2, "0")}`;
   const timerUrgent = g.timeLeft <= 30 && Math.floor(g.timeLeft * 2) % 2 === 0;
 
-  if (g.localMode || rotated) {
+  if (onlinePortrait) {
+    // Online portrait — counter-rotate HUD so it reads upright on the rotated canvas
+    // Canvas is rotated -90° via CSS, so we rotate text +90° to compensate.
+    // Top-left of the phone screen = top-right of the canvas.
+    ctx.save();
+    ctx.translate(cw - 16, 16);
+    ctx.rotate(Math.PI / 2);
+    const gap = 22;
+    const pillW = gap * 4.2, pillH = 36;
+    ctx.fillStyle = "rgba(0,0,0,0.5)";
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(0, 0, pillW, pillH, 8);
+    else ctx.rect(0, 0, pillW, pillH);
+    ctx.fill();
+    ctx.textAlign = "center";
+    const cx = pillW / 2;
+    ctx.font = `bold 16px system-ui`;
+    ctx.fillStyle = RED; ctx.fillText(String(g.score.red), cx - gap, 16);
+    ctx.fillStyle = "rgba(255,255,255,0.45)"; ctx.fillText("-", cx, 16);
+    ctx.fillStyle = BLUE; ctx.fillText(String(g.score.blue), cx + gap, 16);
+    ctx.font = `10px system-ui`;
+    ctx.fillStyle = timerUrgent ? "#e74c3c" : "rgba(255,255,255,0.55)";
+    ctx.fillText(timerStr, cx, 30);
+    ctx.restore();
+  } else if (g.localMode || rotated) {
     // Compact overlay — pill centered on pitch, just below top edge
     const [pcxRaw, pcyRaw] = toS(PITCH_WIDTH / 2, 0);
     const sx = Math.round(pcxRaw), sy = Math.round(pcyRaw + 28 * scale);
@@ -659,7 +687,15 @@ function render(ctx, canvas, g, localTeam, rotated, dpr = 1) {
     const qColor = g.connQuality === "ok" ? "rgba(46,204,113,0.6)" : g.connQuality === "poor" ? "rgba(231,76,60,0.6)" : "rgba(255,255,255,0.3)";
     ctx.fillStyle = qColor;
     ctx.font = "10px system-ui";
-    if (rotated) {
+    if (onlinePortrait) {
+      // Top-right of phone screen (canvas rotated -90°) = bottom-right of canvas
+      ctx.save();
+      ctx.translate(cw - 8, ch - 8);
+      ctx.rotate(Math.PI / 2);
+      ctx.textAlign = "right";
+      ctx.fillText(label, 0, 0);
+      ctx.restore();
+    } else if (rotated) {
       ctx.textAlign = "right";
       ctx.fillText(label, cw - 6, 14);
     } else {
@@ -679,7 +715,16 @@ function render(ctx, canvas, g, localTeam, rotated, dpr = 1) {
 
     ctx.globalAlpha = alpha;
     const golSize = Math.max(48, 64 * scale);
-    if (rotated) {
+    if (onlinePortrait) {
+      ctx.save();
+      ctx.translate(cw / 2, ch / 2);
+      ctx.rotate(Math.PI / 2);
+      ctx.fillStyle = "#fff";
+      ctx.font = `bold ${golSize}px system-ui`;
+      ctx.textAlign = "center";
+      ctx.fillText("GOL!", 0, 0);
+      ctx.restore();
+    } else if (rotated) {
       ctx.save();
       ctx.translate(cw / 2, ch / 2);
       ctx.rotate(-Math.PI / 2);
@@ -705,7 +750,19 @@ function render(ctx, canvas, g, localTeam, rotated, dpr = 1) {
     ctx.fillRect(0, 0, cw, ch);
     ctx.globalAlpha = Math.max(0, alpha);
     const htSize = Math.max(32, 52 * scale);
-    if (rotated) {
+    if (onlinePortrait) {
+      ctx.save();
+      ctx.translate(cw / 2, ch / 2);
+      ctx.rotate(Math.PI / 2);
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#fff";
+      ctx.font = `bold ${htSize}px system-ui`;
+      ctx.fillText("HALF TIME", 0, -htSize * 0.6);
+      ctx.font = `${htSize * 0.55}px system-ui`;
+      ctx.fillStyle = "rgba(255,255,255,0.6)";
+      ctx.fillText("Teams switch sides", 0, htSize * 0.5);
+      ctx.restore();
+    } else if (rotated) {
       ctx.save();
       ctx.translate(cw / 2, ch / 2);
       ctx.rotate(-Math.PI / 2);
@@ -735,8 +792,17 @@ function render(ctx, canvas, g, localTeam, rotated, dpr = 1) {
     ctx.globalAlpha = 0.65;
     ctx.fillStyle = "#fff";
     ctx.font = `${koSize}px system-ui`;
-    if (rotated) {
-      // Draw at pill position + offset in canvas X (= portrait DOWN) — CSS rotate(90deg) makes it read sideways
+    if (onlinePortrait) {
+      // Counter-rotate so text reads upright — above the center circle
+      const [pcxR, pcyR] = toS(PITCH_WIDTH / 2, PITCH_HEIGHT / 2);
+      ctx.save();
+      ctx.translate(pcxR, pcyR);
+      ctx.rotate(Math.PI / 2);
+      ctx.textAlign = "center";
+      ctx.fillText("Kick the ball to start!", 0, -(55 * scale + 10));
+      ctx.restore();
+    } else if (rotated) {
+      // Local portrait — draw sideways (matches rotated canvas for two-player)
       const [pcxR, pcyR] = toS(PITCH_WIDTH / 2, 0);
       const pillRight = Math.round(pcxR + 26 * 1.9 + 10);
       ctx.textAlign = "left";
@@ -793,6 +859,7 @@ export default function Game({ localMode = false }) {
   const currentUser = useAuthStore((s) => s.currentUser);
   const [team, setTeam] = useState(localMode ? "red" : null);
   const [rotated, setRotated] = useState(false);
+  const [portrait, setPortrait] = useState(false);
   const [gameOver, setGameOver] = useState(false);
   const [copied, setCopied] = useState(false);
   const [muted, setMutedState] = useState(isMuted());
@@ -841,6 +908,7 @@ export default function Game({ localMode = false }) {
     joystick2: null,
     touchKick2: false,
     rotated: false,
+    portrait: false,
     timeLeft: 300,
     half: 1,
     swapped: false,
@@ -1080,13 +1148,18 @@ gs.current.localMode = localMode;
     const canvas = canvasRef.current;
     if (!canvas) return;
     const sync = () => {
-      const portrait = window.innerWidth < window.innerHeight;
-      gs.current.rotated = portrait;
-      setRotated(portrait);
+      const isPortrait = window.innerWidth < window.innerHeight;
+      gs.current.rotated = isPortrait;
+      gs.current.portrait = isPortrait;
+      setRotated(isPortrait);
+      setPortrait(isPortrait);
       const dpr = window.devicePixelRatio || 1;
       gs.current.dpr = dpr;
-      if (portrait) {
-        // Render in landscape, rotate 90° via CSS to fill portrait screen
+      if (isPortrait) {
+        // Render in landscape, rotate via CSS to fill portrait screen
+        // Online: -90° so host (left/red) appears at bottom, attacks upward
+        // Local:  +90° so P1 is at the bottom half of the phone
+        const angle = localMode ? 90 : -90;
         canvas.width = window.innerHeight * dpr;
         canvas.height = window.innerWidth * dpr;
         canvas.style.width = window.innerHeight + "px";
@@ -1094,7 +1167,7 @@ gs.current.localMode = localMode;
         canvas.style.position = "fixed";
         canvas.style.top = "50%";
         canvas.style.left = "50%";
-        canvas.style.transform = "translate(-50%, -50%) rotate(90deg)";
+        canvas.style.transform = `translate(-50%, -50%) rotate(${angle}deg)`;
       } else {
         canvas.width = window.innerWidth * dpr;
         canvas.height = window.innerHeight * dpr;
@@ -1173,7 +1246,19 @@ gs.current.localMode = localMode;
         // Spectator: skip all player input/physics; just interpolate + render
       } else {
       // ── Player 1 input ──
-      if (g.rotated) {
+      const onlinePort = g.rotated && !localMode;
+      if (onlinePort) {
+        // Online portrait: CSS rotate(-90deg) — axes swapped + inverted vs local
+        if (keys.has("KeyW"))  ax += 1;
+        if (keys.has("KeyS"))  ax -= 1;
+        if (keys.has("KeyA"))  ay -= 1;
+        if (keys.has("KeyD"))  ay += 1;
+        if (keys.has("ArrowUp"))    ax += 1;
+        if (keys.has("ArrowDown"))  ax -= 1;
+        if (keys.has("ArrowLeft"))  ay -= 1;
+        if (keys.has("ArrowRight")) ay += 1;
+      } else if (g.rotated) {
+        // Local portrait: CSS rotate(+90deg)
         if (keys.has("KeyW"))  ax -= 1;
         if (keys.has("KeyS"))  ax += 1;
         if (keys.has("KeyA"))  ay += 1;
@@ -1199,7 +1284,12 @@ gs.current.localMode = localMode;
 
       // Joystick input (mobile)
       if (g.joystick) {
-        if (g.rotated) {
+        if (g.rotated && !localMode) {
+          // Online portrait: CSS rotate(-90deg)
+          ax += -g.joystick.dy;
+          ay += g.joystick.dx;
+        } else if (g.rotated) {
+          // Local portrait: CSS rotate(+90deg)
           ax += g.joystick.dy;
           ay += -g.joystick.dx;
         } else {
