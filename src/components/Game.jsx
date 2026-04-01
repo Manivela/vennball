@@ -998,7 +998,9 @@ gs.current.localMode = localMode;
 
       if (hostID !== localID) {
         const hostState = states.get(hostID);
-        if (hostState?.ball) {
+        // Skip ball updates during kick guard window (prevents stale host data undoing local kicks)
+        const kickGuardActive = gs.current._localKickGuard && (Date.now() - gs.current._localKickGuard < 400);
+        if (hostState?.ball && !kickGuardActive) {
           const bt = gs.current.ballTarget;
           if (bt) {
             bt.x = hostState.ball.x; bt.y = hostState.ball.y;
@@ -1382,12 +1384,14 @@ gs.current.localMode = localMode;
         if (localRes === 2) {
           g.kickBuffer = 0;
           if (g.lastKickFrame > 8) { playKick(); hapticKick(); g.lastKickFrame = 0; }
-          // Snap ballTarget to match local kick so reconciliation doesn't kill momentum
+          // Snap ballTarget + protect from stale host updates overwriting our kick
           if (g.ballTarget) { g.ballTarget.x = ball.x; g.ballTarget.y = ball.y; g.ballTarget.vx = ball.vx; g.ballTarget.vy = ball.vy; }
+          g._localKickGuard = Date.now(); // ignore incoming ball updates briefly
+          g.lastBroadcast = 0; // force immediate broadcast so host sees the kick
         }
         else if (localRes >= 1) {
-          // Body contact — snap target so reconciliation doesn't undo the push
           if (g.ballTarget) { g.ballTarget.x = ball.x; g.ballTarget.y = ball.y; g.ballTarget.vx = ball.vx; g.ballTarget.vy = ball.vy; }
+          g._localKickGuard = Date.now();
           if (localRes === 1 && g.lastDribbleFrame > 12) { playDribble(); g.lastDribbleFrame = 0; }
         }
 
