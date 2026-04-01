@@ -1389,8 +1389,17 @@ gs.current.localMode = localMode;
         g.lastKickFrame = (g.lastKickFrame || 0) + 1;
         g.lastDribbleFrame = (g.lastDribbleFrame || 0) + 1;
         const localRes = playerBallCollision(p, ball, kickPower, getTeammates(p, team));
-        if (localRes === 2) { g.kickBuffer = 0; if (g.lastKickFrame > 8) { playKick(); hapticKick(); g.lastKickFrame = 0; } }
-        else if (localRes === 1 && g.lastDribbleFrame > 12) { playDribble(); g.lastDribbleFrame = 0; }
+        if (localRes === 2) {
+          g.kickBuffer = 0;
+          if (g.lastKickFrame > 8) { playKick(); hapticKick(); g.lastKickFrame = 0; }
+          // Snap ballTarget to match local kick so reconciliation doesn't kill momentum
+          if (g.ballTarget) { g.ballTarget.x = ball.x; g.ballTarget.y = ball.y; g.ballTarget.vx = ball.vx; g.ballTarget.vy = ball.vy; }
+        }
+        else if (localRes >= 1) {
+          // Body contact — snap target so reconciliation doesn't undo the push
+          if (g.ballTarget) { g.ballTarget.x = ball.x; g.ballTarget.y = ball.y; g.ballTarget.vx = ball.vx; g.ballTarget.vy = ball.vy; }
+          if (localRes === 1 && g.lastDribbleFrame > 12) { playDribble(); g.lastDribbleFrame = 0; }
+        }
 
         if (isHost) {
           // Host also processes remote player kicks
