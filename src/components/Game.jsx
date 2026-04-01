@@ -1392,11 +1392,16 @@ gs.current.localMode = localMode;
         }
 
         if (isHost) {
-          // Host also processes remote player kicks
+          // Host processes remote player kicks using their REPORTED position (targetX/Y),
+          // not the interpolated visual position — avoids lag causing missed kicks.
           g.remotePlayers.forEach((rp) => {
             const rpTeam = rp.team || team;
             const rpKickPower = typeof rp.kicking === "number" ? rp.kicking : (rp.kicking ? KICK_MIN_MULT : 0);
+            // Temporarily use reported position for collision
+            const visX = rp.x, visY = rp.y;
+            if (rp.targetX !== undefined) { rp.x = rp.targetX; rp.y = rp.targetY; }
             const rk = playerBallCollision(rp, ball, rpKickPower, getTeammates(rp, rpTeam));
+            rp.x = visX; rp.y = visY; // restore visual position
             if (rk === 2) { rp.kicking = 0; if (g.lastKickFrame > 8) { playKick(); hapticKick(); g.lastKickFrame = 0; } }
             else if (rk === 1 && g.lastDribbleFrame > 12) { playDribble(); g.lastDribbleFrame = 0; }
           });
