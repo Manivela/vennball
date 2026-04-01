@@ -1,6 +1,7 @@
 import { useRef, useEffect, useState } from "react";
 import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { useWebRtcProvider } from "../hooks/useWebRtc";
+import { useGameServer } from "../hooks/useGameServer";
 import TouchControls from "./TouchControls";
 import { useAuthStore } from "../hooks/useStore";
 import {
@@ -879,7 +880,11 @@ export default function Game({ localMode = false }) {
     if (!localMode && !currentUser) navigate("/");
   }, [currentUser, navigate]); // eslint-disable-line
 
-  const rtc = useWebRtcProvider(localMode ? null : roomId);
+  // Server-authoritative mode: if VITE_SERVER_URL is set, use game server instead of P2P
+  const serverConn = useGameServer(localMode ? null : roomId);
+  const serverMode = !localMode && !!serverConn;
+
+  const rtc = useWebRtcProvider(localMode || serverMode ? null : roomId);
   const mockAwareness = useRef({
     clientID: 1,
     getStates: () => new Map(),
@@ -887,7 +892,7 @@ export default function Game({ localMode = false }) {
     on: () => {},
     off: () => {},
   });
-  const awareness = localMode ? mockAwareness.current : rtc?.awareness;
+  const awareness = localMode ? mockAwareness.current : serverMode ? null : rtc?.awareness;
 
   // Mutable game state (not React state — too slow for 60fps)
   const gs = useRef({
@@ -939,6 +944,17 @@ export default function Game({ localMode = false }) {
       gs.current.localPlayer.vx = 0;
       gs.current.localPlayer.vy = 0;
       setTeam("spectator");
+      return;
+    }
+    // Server mode: tell the server we're joining
+    if (serverMode && serverConn) {
+      serverConn.send({ type: "join", team: t, name: currentUser?.name });
+      const pos = spawnPos(t, gs.current.swapped);
+      gs.current.localPlayer.x = pos.x;
+      gs.current.localPlayer.y = pos.y;
+      gs.current.localPlayer.vx = 0;
+      gs.current.localPlayer.vy = 0;
+      setTeam(t);
       return;
     }
     const pos = localMode
@@ -1114,6 +1130,75 @@ gs.current.localMode = localMode;
     return () => awareness.off("change", handle);
   }, [awareness]);
 
+  // Server-mode: snapshot listener — replaces awareness entirely
+  useEffect(() => {
+    if (!serverMode || !serverConn) return;
+    const handle = () => {
+      const snap = serverConn.states.get("__snapshot");
+      if (!snap) return;
+      const g = gs.current;
+      // Update ball
+      g.ball.x = snap.ball.x; g.ball.y = snap.ball.y;
+      g.ball.vx = snap.ball.vx; g.ball.vy = snap.ball.vy;
+      // Update game state
+      g.score.red = snap.score.red; g.score.blue = snap.score.blue;
+      g.timeLeft = snap.timeLeft;
+      g.half = snap.half;
+      g.swapped = snap.swapped;
+      g.kickedOff = snap.kickedOff;
+      g.halftimeFlash = snap.halftimeFlash || 0;
+      if (snap.gameOver && !g.gameOver) { g.gameOver = true; gameOverSetterRef.current?.(true); }
+      // Goal flash
+      if (snap.goalFlash > 0 && g.goalFlash === 0) {
+        g.goalFlash = snap.goalFlash;
+        g.lastGoalTeam = snap.lastGoalTeam;
+        g.goalCooldown = snap.goalCooldown || 180;
+        g.pendingReset = snap.pendingReset;
+        spawnGoalParticles(g.particles, g.ball.x, g.ball.y, snap.lastGoalTeam === "red" ? "blue" : "red");
+        g.shakeFrames = 14; g.slowMoFrames = 18;
+        playGoal(); hapticGoal();
+      }
+      g.goalCooldown = snap.goalCooldown || 0;
+      g.pendingReset = snap.pendingReset;
+      // Update all players (including local — server is authoritative)
+      const myId = serverConn.clientID;
+      g.remotePlayers.clear();
+      for (const p of snap.players) {
+        if (p.id === myId) {
+          // Blend: keep local position for responsiveness, gently correct toward server
+          g.localPlayer.x += (p.x - g.localPlayer.x) * 0.3;
+          g.localPlayer.y += (p.y - g.localPlayer.y) * 0.3;
+          g.localPlayer.vx = p.vx; g.localPlayer.vy = p.vy;
+        } else {
+          const existing = g._serverPlayers?.get(p.id);
+          if (existing) {
+            existing.targetX = p.x; existing.targetY = p.y;
+            existing.vx = p.vx; existing.vy = p.vy;
+            existing.team = p.team; existing.name = p.name;
+            existing.kicking = p.kicking; existing.charging = p.charging;
+            g.remotePlayers.set(p.id, existing);
+          } else {
+            const rp = { x: p.x, y: p.y, targetX: p.x, targetY: p.y, vx: p.vx, vy: p.vy, team: p.team, name: p.name, kicking: p.kicking, charging: p.charging };
+            if (!g._serverPlayers) g._serverPlayers = new Map();
+            g._serverPlayers.set(p.id, rp);
+            g.remotePlayers.set(p.id, rp);
+          }
+        }
+      }
+      // Update roster for team picker
+      const red = [], blue = [];
+      for (const p of snap.players) {
+        if (p.team === "red") red.push({ id: p.id, name: p.name });
+        else if (p.team === "blue") blue.push({ id: p.id, name: p.name });
+      }
+      setTeamRoster({ red, blue });
+      g.connQuality = "ok";
+      g._lastAwarenessUpdate = Date.now();
+    };
+    serverConn.on("change", handle);
+    return () => serverConn.off("change", handle);
+  }, [serverMode, serverConn]);
+
   // Team pick screen: show who is already on each team (peers broadcast after joining)
   useEffect(() => {
     if (localMode || team || !awareness) return;
@@ -1190,7 +1275,8 @@ gs.current.localMode = localMode;
 
   // Game loop
   useEffect(() => {
-    if (!team || !awareness) return;
+    if (!team) return;
+    if (!serverMode && !awareness) return;
 
 
 
@@ -1300,6 +1386,36 @@ gs.current.localMode = localMode;
 
       const mag = Math.hypot(ax, ay);
       if (mag > 1) { ax /= mag; ay /= mag; }
+
+      // ── Server mode: send input, skip all local physics ──
+      if (serverMode && serverConn) {
+        serverConn.send({ type: "input", ax, ay, kick: kickHeld });
+        // Interpolate remote players toward server positions
+        g.remotePlayers.forEach((rp) => {
+          if (rp.targetX !== undefined) {
+            rp.x += (rp.targetX - rp.x) * 0.3;
+            rp.y += (rp.targetY - rp.y) * 0.3;
+          }
+        });
+        // Local player prediction: apply input locally for responsiveness
+        p.vx = (p.vx + ax * PLAYER_ACCEL) * PLAYER_FRICTION;
+        p.vy = (p.vy + ay * PLAYER_ACCEL) * PLAYER_FRICTION;
+        p.x += p.vx; p.y += p.vy;
+        p.x = clamp(p.x, PLAYER_RADIUS, PITCH_WIDTH - PLAYER_RADIUS);
+        p.y = clamp(p.y, PLAYER_RADIUS, PITCH_HEIGHT - PLAYER_RADIUS);
+        // Particles + rendering still run
+        tickParticles(g.particles);
+        if (g.goalFlash > 0) g.goalFlash--;
+        if (g.goalCooldown > 0) g.goalCooldown--;
+        if (g.halftimeFlash > 0) g.halftimeFlash--;
+        if (g.slowMoFrames > 0) g.slowMoFrames--;
+        const dpr = gs.current.dpr || 1;
+        ctx.save(); ctx.scale(dpr, dpr);
+        render(ctx, canvas, g, team || "spectator", gs.current.rotated, dpr);
+        ctx.restore();
+        animId = requestAnimationFrame(tick);
+        return;
+      }
 
       // ── Player 2 input + physics (local mode only) ──
       if (localMode && g.localPlayer2) {
@@ -1635,7 +1751,7 @@ gs.current.localMode = localMode;
 
     animId = requestAnimationFrame(tick);
     return () => { cancelAnimationFrame(animId); };
-  }, [team, awareness, currentUser, roomId, localMode]);
+  }, [team, awareness, currentUser, roomId, localMode, serverMode, serverConn]);
 
   useEffect(() => {
     const inMatchView = localMode || !!team;
