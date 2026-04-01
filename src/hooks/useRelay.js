@@ -9,7 +9,7 @@ import { useRef, useEffect } from "react";
  * fan-out), vs O(n²) in a mesh.
  */
 
-const RELAY_URL = import.meta.env.VITE_RELAY_URL || "ws://localhost:4444";
+const RELAY_URL = import.meta.env.VITE_RELAY_URL || "wss://vennball-relay.fly.dev";
 
 // Cache per room so React strict-mode double-mounts don't double-connect
 const relays = new Map();
