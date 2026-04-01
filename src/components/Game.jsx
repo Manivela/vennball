@@ -1383,12 +1383,16 @@ gs.current.localMode = localMode;
         const getTeammates = (pl, plTeam) =>
           allPlayers.filter((o) => o !== pl && (o.team || team) === plTeam);
 
+        // Ball collisions: host is authoritative, but ALL clients run local player
+        // collision for instant kick feedback (client-side prediction).
+        g.lastKickFrame = (g.lastKickFrame || 0) + 1;
+        g.lastDribbleFrame = (g.lastDribbleFrame || 0) + 1;
+        const localRes = playerBallCollision(p, ball, kickPower, getTeammates(p, team));
+        if (localRes === 2) { g.kickBuffer = 0; if (g.lastKickFrame > 8) { playKick(); hapticKick(); g.lastKickFrame = 0; } }
+        else if (localRes === 1 && g.lastDribbleFrame > 12) { playDribble(); g.lastDribbleFrame = 0; }
+
         if (isHost) {
-          g.lastKickFrame = (g.lastKickFrame || 0) + 1;
-          g.lastDribbleFrame = (g.lastDribbleFrame || 0) + 1;
-          const res = playerBallCollision(p, ball, kickPower, getTeammates(p, team));
-          if (res === 2) { g.kickBuffer = 0; if (g.lastKickFrame > 8) { playKick(); hapticKick(); g.lastKickFrame = 0; } }
-          else if (res === 1 && g.lastDribbleFrame > 12) { playDribble(); g.lastDribbleFrame = 0; }
+          // Host also processes remote player kicks
           g.remotePlayers.forEach((rp) => {
             const rpTeam = rp.team || team;
             const rpKickPower = typeof rp.kicking === "number" ? rp.kicking : (rp.kicking ? KICK_MIN_MULT : 0);
@@ -1406,7 +1410,6 @@ gs.current.localMode = localMode;
             }
           }
         } else {
-          // Client: only resolve local player against others (prevents overlap on screen)
           for (let j = 1; j < allPlayers.length; j++) {
             resolveCircleCollision(p, PLAYER_RADIUS, allPlayers[j], PLAYER_RADIUS);
           }
@@ -1429,22 +1432,31 @@ gs.current.localMode = localMode;
             hapticGoal();
           }
         } else if (g.ballTarget) {
-          // Advance target with same physics as host so it stays current between updates
+          // Client: run local ball physics (walls, friction) for prediction
+          ball.vx *= BALL_FRICTION;
+          ball.vy *= BALL_FRICTION;
+          ball.x += ball.vx;
+          ball.y += ball.vy;
+          // Wall bounces
+          if (ball.y - BALL_RADIUS < 0) { ball.y = BALL_RADIUS; ball.vy = Math.abs(ball.vy) * COLLISION_RESTITUTION; }
+          if (ball.y + BALL_RADIUS > PITCH_HEIGHT) { ball.y = PITCH_HEIGHT - BALL_RADIUS; ball.vy = -Math.abs(ball.vy) * COLLISION_RESTITUTION; }
+          if (ball.x - BALL_RADIUS < 0 && !(ball.y > GOAL_TOP && ball.y < GOAL_BOT)) { ball.x = BALL_RADIUS; ball.vx = Math.abs(ball.vx) * COLLISION_RESTITUTION; }
+          if (ball.x + BALL_RADIUS > PITCH_WIDTH && !(ball.y > GOAL_TOP && ball.y < GOAL_BOT)) { ball.x = PITCH_WIDTH - BALL_RADIUS; ball.vx = -Math.abs(ball.vx) * COLLISION_RESTITUTION; }
+          // Advance host target with same physics
           const t = g.ballTarget;
           t.x += t.vx;
           t.y += t.vy;
           t.vx *= BALL_FRICTION;
           t.vy *= BALL_FRICTION;
-          // Wall bounces on predicted target (prevents clipping between updates)
           if (t.y - BALL_RADIUS < 0) { t.y = BALL_RADIUS; t.vy = Math.abs(t.vy) * COLLISION_RESTITUTION; }
           if (t.y + BALL_RADIUS > PITCH_HEIGHT) { t.y = PITCH_HEIGHT - BALL_RADIUS; t.vy = -Math.abs(t.vy) * COLLISION_RESTITUTION; }
           if (t.x - BALL_RADIUS < 0 && !(t.y > GOAL_TOP && t.y < GOAL_BOT)) { t.x = BALL_RADIUS; t.vx = Math.abs(t.vx) * COLLISION_RESTITUTION; }
           if (t.x + BALL_RADIUS > PITCH_WIDTH && !(t.y > GOAL_TOP && t.y < GOAL_BOT)) { t.x = PITCH_WIDTH - BALL_RADIUS; t.vx = -Math.abs(t.vx) * COLLISION_RESTITUTION; }
-          // Smoothly lerp ball toward predicted target
-          ball.x += (t.x - ball.x) * 0.35;
-          ball.y += (t.y - ball.y) * 0.35;
-          ball.vx = t.vx;
-          ball.vy = t.vy;
+          // Reconcile: pull local prediction toward host authority
+          ball.x += (t.x - ball.x) * 0.15;
+          ball.y += (t.y - ball.y) * 0.15;
+          ball.vx += (t.vx - ball.vx) * 0.15;
+          ball.vy += (t.vy - ball.vy) * 0.15;
         }
       }
 
@@ -1454,7 +1466,12 @@ gs.current.localMode = localMode;
         awareness.setLocalState({ spectator: true, _ts: now });
         g.lastBroadcast = now;
       }
-      if (!localMode && !isSpectator && now - g.lastBroadcast > BROADCAST_INTERVAL) {
+      // Adaptive broadcast rate: more peers = less frequent to avoid mesh saturation
+      const peerCount = g.remotePlayers.size;
+      const interval = isHost
+        ? BROADCAST_INTERVAL  // Host always broadcasts at full rate (ball authority)
+        : peerCount > 8 ? 120 : peerCount > 4 ? 80 : BROADCAST_INTERVAL;
+      if (!localMode && !isSpectator && now - g.lastBroadcast > interval) {
         // Reuse broadcast object to avoid allocation every interval
         const state = g._broadcastBuf || (g._broadcastBuf = {});
         state.x = p.x;
