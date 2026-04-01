@@ -1032,12 +1032,13 @@ gs.current.localMode = localMode;
         }
       }
 
-      // Latency sampling — check only a few peers, not all
+      // Latency sampling — skip spectators (they broadcast every 2s, not indicative)
       let maxAge = 0, sampled = 0;
       const now = Date.now();
       states.forEach((state, id) => {
-        if (sampled >= 3) return; // sample up to 3 peers
+        if (sampled >= 3) return;
         if (id === localID) return;
+        if (state?.spectator || state?.team === "spectator") return;
         if (state?._ts) { maxAge = Math.max(maxAge, now - state._ts); sampled++; }
       });
       if (sampled > 0) {
