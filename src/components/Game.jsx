@@ -1485,21 +1485,20 @@ gs.current.localMode = localMode;
           if (localRes === 1 && g.lastDribbleFrame > 12) { playDribble(); g.lastDribbleFrame = 0; }
         }
 
-        if (isHost) {
-          // Host processes remote player kicks using their REPORTED position (targetX/Y),
-          // not the interpolated visual position — avoids lag causing missed kicks.
-          g.remotePlayers.forEach((rp) => {
-            const rpTeam = rp.team || team;
-            const rpKickPower = typeof rp.kicking === "number" ? rp.kicking : (rp.kicking ? KICK_MIN_MULT : 0);
-            // Temporarily use reported position for collision
-            const visX = rp.x, visY = rp.y;
-            if (rp.targetX !== undefined) { rp.x = rp.targetX; rp.y = rp.targetY; }
-            const rk = playerBallCollision(rp, ball, rpKickPower, getTeammates(rp, rpTeam));
-            rp.x = visX; rp.y = visY; // restore visual position
-            if (rk === 2) { rp.kicking = 0; if (g.lastKickFrame > 8) { playKick(); hapticKick(); g.lastKickFrame = 0; } }
-            else if (rk === 1 && g.lastDribbleFrame > 12) { playDribble(); g.lastDribbleFrame = 0; }
-          });
-        }
+        // All clients run remote player ball collisions (prevents ball phasing through players).
+        // Host uses reported position for accuracy; clients use visual position.
+        g.remotePlayers.forEach((rp) => {
+          const rpTeam = rp.team || team;
+          const rpKickPower = typeof rp.kicking === "number" ? rp.kicking : (rp.kicking ? KICK_MIN_MULT : 0);
+          let useX = rp.x, useY = rp.y;
+          if (isHost && rp.targetX !== undefined) { useX = rp.targetX; useY = rp.targetY; }
+          const visX = rp.x, visY = rp.y;
+          rp.x = useX; rp.y = useY;
+          const rk = playerBallCollision(rp, ball, rpKickPower, getTeammates(rp, rpTeam));
+          rp.x = visX; rp.y = visY;
+          if (rk === 2) { rp.kicking = 0; if (g.lastKickFrame > 8) { playKick(); hapticKick(); g.lastKickFrame = 0; } }
+          else if (rk === 1 && g.lastDribbleFrame > 12) { playDribble(); g.lastDribbleFrame = 0; }
+        });
 
         // Player-player collision: host runs all pairs; clients only resolve local vs others
         if (isHost || localMode) {
