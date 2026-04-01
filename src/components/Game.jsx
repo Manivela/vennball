@@ -20,6 +20,11 @@ import {
   COLLISION_RESTITUTION,
   BROADCAST_INTERVAL,
 } from "../constants";
+import {
+  playKick, playDribble, playGoal, playWhistle,
+  hapticKick, hapticGoal,
+  isMuted, setMuted,
+} from "../utils/audio";
 
 const RED = "#e74c3c";
 const BLUE = "#3498db";
@@ -145,6 +150,40 @@ function spawnPosOnline(team, swapped, roomId, awareness, roundSalt) {
   };
 }
 
+// ── Particles ────────────────────────────────────────────────────
+
+function spawnGoalParticles(particles, x, y, teamColor) {
+  const colors = teamColor === "red"
+    ? ["#e74c3c", "#f39c12", "#fff", "#ff6b6b"]
+    : ["#3498db", "#2ecc71", "#fff", "#74b9ff"];
+  for (let i = 0; i < 36; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 1.5 + Math.random() * 4;
+    particles.push({
+      x, y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      life: 40 + Math.random() * 30,
+      maxLife: 40 + Math.random() * 30,
+      size: 2 + Math.random() * 4,
+      color: colors[Math.floor(Math.random() * colors.length)],
+    });
+  }
+}
+
+function tickParticles(particles) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vx *= 0.96;
+    p.vy *= 0.96;
+    p.vy += 0.04;
+    p.life--;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+
 // ── Physics ──────────────────────────────────────────────────────
 
 function resolveCircleCollision(a, aRadius, b, bRadius) {
@@ -177,48 +216,79 @@ function resolveCircleCollision(a, aRadius, b, bRadius) {
   return true;
 }
 
-function playerBallCollision(player, ball, kicking) {
+const PASS_MAGNET = 0.35;
+const PASS_CONE = Math.cos(Math.PI / 4);
+const CHARGE_MAX = 30;
+const KICK_MIN_MULT = 0.4;
+const KICK_MAX_MULT = 1.8;
+
+function assistDir(player, ball, nx, ny, teammates) {
+  if (!teammates || teammates.length === 0) return { nx, ny };
+  let bestDot = -1, bestTx = nx, bestTy = ny;
+  for (const tm of teammates) {
+    const tdx = tm.x - ball.x, tdy = tm.y - ball.y;
+    const td = Math.hypot(tdx, tdy);
+    if (td < 30) continue;
+    const tnx = tdx / td, tny = tdy / td;
+    const d = nx * tnx + ny * tny;
+    if (d > PASS_CONE && d > bestDot) { bestDot = d; bestTx = tnx; bestTy = tny; }
+  }
+  if (bestDot <= PASS_CONE) return { nx, ny };
+  const bx = nx + (bestTx - nx) * PASS_MAGNET;
+  const by = ny + (bestTy - ny) * PASS_MAGNET;
+  const bm = Math.hypot(bx, by) || 1;
+  return { nx: bx / bm, ny: by / bm };
+}
+
+// kickPower: 0 = not kicking, >0 = force multiplier (KICK_MIN_MULT..KICK_MAX_MULT)
+// Returns: 0 = no contact, 1 = body contact (dribble), 2 = kick
+function playerBallCollision(player, ball, kickPower, teammates) {
   const dx = ball.x - player.x;
   const dy = ball.y - player.y;
   const d = Math.hypot(dx, dy);
   const minDist = PLAYER_RADIUS + BALL_RADIUS;
 
   if (d >= minDist || d === 0) {
-    // Kick at range?
-    if (kicking && d < KICK_RANGE && d > 0) {
-      const nx = dx / d;
-      const ny = dy / d;
-      ball.vx += nx * KICK_FORCE;
-      ball.vy += ny * KICK_FORCE;
-      return true;
+    if (kickPower > 0 && d < KICK_RANGE && d > 0) {
+      let nx = dx / d, ny = dy / d;
+      ({ nx, ny } = assistDir(player, ball, nx, ny, teammates));
+      ball.vx += nx * KICK_FORCE * kickPower;
+      ball.vy += ny * KICK_FORCE * kickPower;
+      return 2;
     }
-    return false;
+    return 0;
   }
 
   const nx = dx / d;
   const ny = dy / d;
   const overlap = minDist - d;
 
-  // Push ball out
-  ball.x += nx * overlap;
-  ball.y += ny * overlap;
+  ball.x += nx * (overlap + 1.5);
+  ball.y += ny * (overlap + 1.5);
 
-  // Transfer velocity
   const relVx = player.vx - ball.vx;
   const relVy = player.vy - ball.vy;
   const dot = relVx * nx + relVy * ny;
   if (dot > 0) {
-    ball.vx += nx * dot * 1.1;
-    ball.vy += ny * dot * 1.1;
+    ball.vx += nx * dot * 1.3;
+    ball.vy += ny * dot * 1.3;
   }
 
-  // Kick boost
-  if (kicking) {
-    ball.vx += nx * KICK_FORCE;
-    ball.vy += ny * KICK_FORCE;
+  const ballSpd = ball.vx * nx + ball.vy * ny;
+  if (ballSpd < 1.8) {
+    ball.vx += nx * (1.8 - ballSpd);
+    ball.vy += ny * (1.8 - ballSpd);
   }
 
-  return true;
+  if (kickPower > 0) {
+    let knx = nx, kny = ny;
+    ({ nx: knx, ny: kny } = assistDir(player, ball, nx, ny, teammates));
+    ball.vx += knx * KICK_FORCE * kickPower;
+    ball.vy += kny * KICK_FORCE * kickPower;
+    return 2;
+  }
+
+  return 1;
 }
 
 function tickBall(ball) {
@@ -285,6 +355,12 @@ function tickBall(ball) {
 function render(ctx, canvas, g, localTeam, rotated, dpr = 1) {
   const cw = canvas.width / dpr;
   const ch = canvas.height / dpr;
+
+  if (g.shakeFrames > 0) {
+    const intensity = g.shakeFrames * 0.6;
+    ctx.translate((Math.random() - 0.5) * intensity, (Math.random() - 0.5) * intensity);
+    g.shakeFrames--;
+  }
 
   // In local mode the score/controls overlay the pitch — no reserved space.
   // In rotated (portrait) mode the HUD/hint land on the sides, not top/bottom,
@@ -402,17 +478,18 @@ function render(ctx, canvas, g, localTeam, rotated, dpr = 1) {
   };
 
   // Players
-  const drawPlayer = (x, y, team, name, isLocal, kicking, flippedLabel = false) => {
+  const drawPlayer = (x, y, team, name, isLocal, kicking, flippedLabel = false, chargeRatio = 0) => {
     const [sx, sy] = toS(x, y);
     const r = PLAYER_RADIUS * scale;
     const color = team === "red" ? RED : BLUE;
 
-    // Kick ring
-    if (kicking) {
-      ctx.strokeStyle = "rgba(255,255,255,0.5)";
+    // Kick ring (pulse while charging)
+    if (kicking || chargeRatio > 0) {
+      const ringR = KICK_RANGE * scale * (chargeRatio > 0 ? 0.7 + chargeRatio * 0.3 : 1);
+      ctx.strokeStyle = chargeRatio > 0 ? `rgba(255,255,255,${0.25 + chargeRatio * 0.35})` : "rgba(255,255,255,0.5)";
       ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.arc(sx, sy, KICK_RANGE * scale, 0, Math.PI * 2);
+      ctx.arc(sx, sy, ringR, 0, Math.PI * 2);
       ctx.stroke();
     }
 
@@ -428,10 +505,46 @@ function render(ctx, canvas, g, localTeam, rotated, dpr = 1) {
     ctx.lineWidth = highlight ? 2.5 : 1.5;
     ctx.stroke();
 
-    // Name tag — above player from each player's POV
+    // Charge bar — "below" the player from their POV
+    if (chargeRatio > 0.18) {
+      const barW = r * 2.4;
+      const barH = 4 * scale;
+      let barX, barY;
+      if (rotated) {
+        // Rotated: "below" = +X for P1, -X for flipped P2
+        const dir = flippedLabel ? -1 : 1;
+        barX = sx + dir * (r + 5 * scale);
+        barY = sy - barW / 2;
+        // Draw vertical bar
+        ctx.fillStyle = "rgba(0,0,0,0.5)";
+        ctx.fillRect(barX, barY, barH, barW);
+        const fill = chargeRatio >= 1 ? "#f1c40f" : chargeRatio > 0.6 ? "#e67e22" : "#2ecc71";
+        ctx.fillStyle = fill;
+        if (flippedLabel) {
+          ctx.fillRect(barX, barY + barW * (1 - chargeRatio), barH, barW * chargeRatio);
+        } else {
+          ctx.fillRect(barX, barY, barH, barW * chargeRatio);
+        }
+        ctx.strokeStyle = "rgba(255,255,255,0.35)";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(barX, barY, barH, barW);
+      } else {
+        barX = sx - barW / 2;
+        barY = sy + r + 5 * scale;
+        ctx.fillStyle = "rgba(0,0,0,0.5)";
+        ctx.fillRect(barX, barY, barW, barH);
+        const fill = chargeRatio >= 1 ? "#f1c40f" : chargeRatio > 0.6 ? "#e67e22" : "#2ecc71";
+        ctx.fillStyle = fill;
+        ctx.fillRect(barX, barY, barW * chargeRatio, barH);
+        ctx.strokeStyle = "rgba(255,255,255,0.35)";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(barX, barY, barW, barH);
+      }
+    }
+
+    // Name tag
     if (name) {
       if (rotated) {
-        // "above" in portrait: to the left in canvas for P1, to the right for P2
         const offset = flippedLabel ? r + 14 : -(r + 14);
         drawLabel(name, sx + offset, sy, flippedLabel);
       } else {
@@ -440,14 +553,17 @@ function render(ctx, canvas, g, localTeam, rotated, dpr = 1) {
     }
   };
 
-  // Draw local
+  // Draw local (skip in spectator mode)
   const lp = g.localPlayer;
-  drawPlayer(lp.x, lp.y, localTeam, g.localMode ? "P1" : "You", true, g.keys.has("Space") || g.keys.has("KeyX"));
+  if (!g.spectator) {
+    const localCharging = g.wasKicking ? (g.charge || 0) / CHARGE_MAX : 0;
+    drawPlayer(lp.x, lp.y, localTeam, g.localMode ? "P1" : "You", true, false, false, localCharging);
+  }
 
   // Draw remote
   g.remotePlayers.forEach((p, key) => {
     const isP2Local = g.localMode && key === "local2";
-    drawPlayer(p.x, p.y, p.team, p.name, false, p.kicking, isP2Local);
+    drawPlayer(p.x, p.y, p.team, p.name, false, false, isP2Local, p.charging || 0);
   });
 
   // Ball shadow
@@ -516,6 +632,33 @@ function render(ctx, canvas, g, localTeam, rotated, dpr = 1) {
     ctx.font = `${timerFontSize}px system-ui`;
     ctx.fillStyle = timerUrgent ? "#e74c3c" : "rgba(255,255,255,0.55)";
     ctx.fillText(timerStr, cw / 2, hudY + hudFontSize * 0.95);
+  }
+
+  // Particles
+  for (const pt of g.particles) {
+    const [ptx, pty] = toS(pt.x, pt.y);
+    const alpha = pt.life / pt.maxLife;
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = pt.color;
+    ctx.beginPath();
+    ctx.arc(ptx, pty, pt.size * scale, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // Connection quality indicator (top-right or rotated equivalent)
+  if (!g.localMode && !g.spectator) {
+    const label = g.connQuality === "ok" ? "P2P OK" : g.connQuality === "poor" ? "Poor" : "…";
+    const qColor = g.connQuality === "ok" ? "rgba(46,204,113,0.6)" : g.connQuality === "poor" ? "rgba(231,76,60,0.6)" : "rgba(255,255,255,0.3)";
+    ctx.fillStyle = qColor;
+    ctx.font = "10px system-ui";
+    if (rotated) {
+      ctx.textAlign = "right";
+      ctx.fillText(label, cw - 6, 14);
+    } else {
+      ctx.textAlign = "right";
+      ctx.fillText(label, cw - 8, 14);
+    }
   }
 
   // Goal flash
@@ -604,8 +747,8 @@ function render(ctx, canvas, g, localTeam, rotated, dpr = 1) {
     ctx.font = "11px system-ui";
     ctx.textAlign = "center";
     const hint = g.localMode
-      ? "P1: WASD + Space  |  P2: Arrow keys + Enter  |  Esc×2 to menu"
-      : "WASD / Arrows to move  |  Space to kick  |  Share URL to invite  |  Esc×2 to menu";
+      ? "P1: WASD + Space  |  P2: Arrow keys + Enter  |  M to mute  |  Esc×2 to menu"
+      : "WASD / Arrows to move  |  Space to kick  |  M to mute  |  Esc×2 to menu";
     ctx.fillText(hint, cw / 2, ch - 7);
   }
 }
@@ -645,6 +788,7 @@ export default function Game({ localMode = false }) {
   const [rotated, setRotated] = useState(false);
   const [gameOver, setGameOver] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [muted, setMutedState] = useState(isMuted());
   const [teamRoster, setTeamRoster] = useState({ red: [], blue: [] });
   const [shareLinkHover, setShareLinkHover] = useState(false);
   const gameOverSetterRef = useRef(null);
@@ -673,10 +817,10 @@ export default function Game({ localMode = false }) {
 
   // Mutable game state (not React state — too slow for 60fps)
   const gs = useRef({
-    localPlayer: localMode ? { ...spawnPos("red", true), vx: 0, vy: 0 } : { x: 0, y: 0, vx: 0, vy: 0 },
+    localPlayer: localMode ? { ...spawnPos("red", false), vx: 0, vy: 0 } : { x: 0, y: 0, vx: 0, vy: 0 },
     ball: resetBall(),
     localPlayer2: localMode
-      ? { ...spawnPos("blue", true), vx: 0, vy: 0, team: "blue", name: "P2", kicking: false }
+      ? { ...spawnPos("blue", false), vx: 0, vy: 0, team: "blue", name: "P2", kicking: false }
       : null,
     score: { red: 0, blue: 0 },
     keys: new Set(),
@@ -692,14 +836,35 @@ export default function Game({ localMode = false }) {
     rotated: false,
     timeLeft: 300,
     half: 1,
-    swapped: localMode,
+    swapped: false,
     halftimeFlash: 0,
     gameOver: false,
     localMode: false,
     kickedOff: false,
+    particles: [],
+    shakeFrames: 0,
+    slowMoFrames: 0,
+    lastKickFrame: 0,
+    connQuality: "ok",
+    spectator: false,
+    charge: 0,
+    wasKicking: false,
+    kickReleasePower: 0,
+    charge2: 0,
+    wasKicking2: false,
+    kickReleasePower2: 0,
   });
 
   const joinTeam = (t) => {
+    if (t === "spectator") {
+      gs.current.spectator = true;
+      gs.current.localPlayer.x = PITCH_WIDTH / 2;
+      gs.current.localPlayer.y = PITCH_HEIGHT / 2;
+      gs.current.localPlayer.vx = 0;
+      gs.current.localPlayer.vy = 0;
+      setTeam("spectator");
+      return;
+    }
     const pos = localMode
       ? spawnPos(t, gs.current.swapped)
       : awareness
@@ -736,6 +901,12 @@ gs.current.localMode = localMode;
         lastEsc = now;
         return;
       }
+      if (e.code === "KeyM") {
+        const next = !isMuted();
+        setMuted(next);
+        setMutedState(next);
+        return;
+      }
       gs.current.keys.add(e.code);
       if (["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.code)) {
         e.preventDefault();
@@ -760,7 +931,7 @@ gs.current.localMode = localMode;
       const remote = new Map();
 
       states.forEach((state, id) => {
-        if (id === localID || !state?.team) return;
+        if (id === localID || !state?.team || state.team === "spectator" || state.spectator) return;
 
         const existing = gs.current.remotePlayers.get(id);
         if (existing) {
@@ -772,6 +943,7 @@ gs.current.localMode = localMode;
           existing.team = state.team;
           existing.name = state.name;
           existing.kicking = state.kicking;
+          existing.charging = state.charging || 0;
           remote.set(id, existing);
         } else {
           remote.set(id, {
@@ -784,16 +956,16 @@ gs.current.localMode = localMode;
             team: state.team,
             name: state.name,
             kicking: state.kicking,
+            charging: state.charging || 0,
           });
         }
       });
 
       gs.current.remotePlayers = remote;
 
-      // Reconcile ball from the peer with lowest ID (host)
       let hostID = localID;
       states.forEach((state, id) => {
-        if (state?.team && id < hostID) hostID = id;
+        if (state?.team && state.team !== "spectator" && id < hostID) hostID = id;
       });
 
       if (hostID !== localID) {
@@ -813,6 +985,28 @@ gs.current.localMode = localMode;
           gs.current.gameOver = true;
           gameOverSetterRef.current?.(true);
         }
+        if (hostState?.goalFlash > 0 && gs.current.goalFlash === 0) {
+          gs.current.goalFlash = hostState.goalFlash;
+          gs.current.lastGoalTeam = hostState.lastGoalTeam;
+          gs.current.goalCooldown = hostState.goalCooldown || 180;
+          gs.current.pendingReset = true;
+          spawnGoalParticles(gs.current.particles, gs.current.ball.x, gs.current.ball.y, hostState.lastGoalTeam === "red" ? "blue" : "red");
+          gs.current.shakeFrames = 14;
+          gs.current.slowMoFrames = 18;
+          playGoal();
+          hapticGoal();
+        }
+      }
+
+      // Latency: measure age of newest remote timestamp
+      let maxAge = 0, peerCount = 0;
+      const now = Date.now();
+      states.forEach((state, id) => {
+        if (id === localID && state?._ts) return;
+        if (state?._ts) { maxAge = Math.max(maxAge, now - state._ts); peerCount++; }
+      });
+      if (peerCount > 0) {
+        gs.current.connQuality = maxAge < 200 ? "ok" : maxAge < 600 ? "poor" : "bad";
       }
     };
 
@@ -893,12 +1087,22 @@ gs.current.localMode = localMode;
   useEffect(() => {
     if (!team || !awareness) return;
 
+
+
     const canvas = canvasRef.current;
     const ctx = canvas.getContext("2d");
     let animId;
+    let slowSkip = false;
 
     const tick = () => {
       const g = gs.current;
+
+      if (g.slowMoFrames > 0 && !slowSkip) {
+        slowSkip = true;
+        animId = requestAnimationFrame(tick);
+        return;
+      }
+      slowSkip = false;
       const keys = g.keys;
       const p = g.localPlayer;
       const ball = g.ball;
@@ -908,15 +1112,39 @@ gs.current.localMode = localMode;
       const allStates = awareness.getStates();
       let hostID = localID;
       allStates.forEach((state, id) => {
-        if (state?.team && id < hostID) hostID = id;
+        if (state?.team && state.team !== "spectator" && id < hostID) hostID = id;
       });
-      const isHost = localMode || localID === hostID;
+      const isHost = localMode || (localID === hostID && !g.spectator);
+      const isSpectator = g.spectator;
 
-      // ── Player 1 input ──
-      // In portrait mode canvas is rotated 90° CW:
-      //   portrait-up = landscape-left, portrait-left = landscape-down
-      //   so we swap and negate axes accordingly.
       let ax = 0, ay = 0;
+      const kickHeld = !isSpectator && (keys.has("Space") || keys.has("KeyX") || !!g.touchKick);
+
+      // Charge-to-kick: accumulate while held, fire on release with buffer window
+      if (kickHeld) {
+        g.charge = Math.min((g.charge || 0) + 1, CHARGE_MAX);
+        g.kickBuffer = 0;
+      }
+      let kickPower = 0;
+      if (!kickHeld && g.wasKicking) {
+        const t = Math.min(g.charge / CHARGE_MAX, 1);
+        g.kickReleasePower = KICK_MIN_MULT + t * (KICK_MAX_MULT - KICK_MIN_MULT);
+        g.kickBuffer = 14;
+        g.charge = 0;
+      }
+      if (g.kickBuffer > 0) {
+        kickPower = g.kickReleasePower;
+        g.kickBuffer--;
+      } else if (!kickHeld) {
+        g.charge = 0;
+        g.kickReleasePower = 0;
+      }
+      g.wasKicking = kickHeld;
+
+      if (isSpectator) {
+        // Spectator: skip all player input/physics; just interpolate + render
+      } else {
+      // ── Player 1 input ──
       if (g.rotated) {
         if (keys.has("KeyW"))  ax -= 1;
         if (keys.has("KeyS"))  ax += 1;
@@ -955,8 +1183,6 @@ gs.current.localMode = localMode;
       const mag = Math.hypot(ax, ay);
       if (mag > 1) { ax /= mag; ay /= mag; }
 
-      const kicking = keys.has("Space") || keys.has("KeyX") || !!g.touchKick;
-
       // ── Player 2 input + physics (local mode only) ──
       if (localMode && g.localPlayer2) {
         const p2 = g.localPlayer2;
@@ -977,7 +1203,25 @@ gs.current.localMode = localMode;
         }
         const mag2 = Math.hypot(ax2, ay2);
         if (mag2 > 1) { ax2 /= mag2; ay2 /= mag2; }
-        p2.kicking = keys.has("Enter") || keys.has("NumpadEnter") || !!g.touchKick2;
+        const kick2Held = keys.has("Enter") || keys.has("NumpadEnter") || !!g.touchKick2;
+        if (kick2Held) { g.charge2 = Math.min((g.charge2 || 0) + 1, CHARGE_MAX); g.kickBuffer2 = 0; }
+        let kickPower2 = 0;
+        if (!kick2Held && g.wasKicking2) {
+          const t2 = Math.min(g.charge2 / CHARGE_MAX, 1);
+          g.kickReleasePower2 = KICK_MIN_MULT + t2 * (KICK_MAX_MULT - KICK_MIN_MULT);
+          g.kickBuffer2 = 14;
+          g.charge2 = 0;
+        }
+        if (g.kickBuffer2 > 0) {
+          kickPower2 = g.kickReleasePower2;
+          g.kickBuffer2--;
+        } else if (!kick2Held) {
+          g.charge2 = 0;
+          g.kickReleasePower2 = 0;
+        }
+        g.wasKicking2 = kick2Held;
+        p2.kicking = kickPower2;
+        p2.charging = kick2Held ? g.charge2 / CHARGE_MAX : 0;
 
         const dist2 = Math.hypot(p2.x - ball.x, p2.y - ball.y);
         const prox2 = Math.max(0, 1 - (dist2 - KICK_RANGE) / (KICK_RANGE * 2.5));
@@ -1002,6 +1246,7 @@ gs.current.localMode = localMode;
       p.y += p.vy;
       p.x = clamp(p.x, PLAYER_RADIUS, PITCH_WIDTH - PLAYER_RADIUS);
       p.y = clamp(p.y, PLAYER_RADIUS, PITCH_HEIGHT - PLAYER_RADIUS);
+      } // end if (!isSpectator)
 
       // ── Interpolate remote players (online only — local mode players move directly) ──
       if (!localMode) {
@@ -1025,13 +1270,14 @@ gs.current.localMode = localMode;
           g.halftimeFlash = 180;
           g.goalCooldown = 180;
           g.kickedOff = false;
+          playWhistle();
           Object.assign(ball, resetBall());
           const sp = localMode
-            ? spawnPos(team, true)
+            ? spawnPos(team, false)
             : spawnPosOnline(team, true, roomId, awareness, onlineSpawnRoundSalt(g));
           p.x = sp.x; p.y = sp.y; p.vx = 0; p.vy = 0;
           if (localMode && g.localPlayer2) {
-            const sp2 = spawnPos("blue", true);
+            const sp2 = spawnPos("blue", false);
             g.localPlayer2.x = sp2.x; g.localPlayer2.y = sp2.y;
             g.localPlayer2.vx = 0; g.localPlayer2.vy = 0;
           }
@@ -1041,6 +1287,7 @@ gs.current.localMode = localMode;
         if (g.timeLeft === 0 && !g.gameOver) {
           g.gameOver = true;
           gameOverSetterRef.current?.(true);
+          playWhistle();
         }
       }
       if (g.halftimeFlash > 0) g.halftimeFlash--;
@@ -1081,24 +1328,34 @@ gs.current.localMode = localMode;
           }
         }
       } else {
-        // Player-ball collisions (host only — non-host interpolates ball from host)
+        // Build teammates list for passing assist
+        const allPlayers = [p];
+        g.remotePlayers.forEach((rp) => allPlayers.push(rp));
+
+        const getTeammates = (pl, plTeam) =>
+          allPlayers.filter((o) => o !== pl && (o.team || team) === plTeam);
+
         if (isHost) {
-          playerBallCollision(p, ball, kicking);
+          g.lastKickFrame = (g.lastKickFrame || 0) + 1;
+          g.lastDribbleFrame = (g.lastDribbleFrame || 0) + 1;
+          const res = playerBallCollision(p, ball, kickPower, getTeammates(p, team));
+          if (res === 2) { g.kickBuffer = 0; if (g.lastKickFrame > 8) { playKick(); hapticKick(); g.lastKickFrame = 0; } }
+          else if (res === 1 && g.lastDribbleFrame > 12) { playDribble(); g.lastDribbleFrame = 0; }
           g.remotePlayers.forEach((rp) => {
-            playerBallCollision(rp, ball, rp.kicking);
+            const rpTeam = rp.team || team;
+            const rpKickPower = typeof rp.kicking === "number" ? rp.kicking : (rp.kicking ? KICK_MIN_MULT : 0);
+            const rk = playerBallCollision(rp, ball, rpKickPower, getTeammates(rp, rpTeam));
+            if (rk === 2) { rp.kicking = 0; if (g.lastKickFrame > 8) { playKick(); hapticKick(); g.lastKickFrame = 0; } }
+            else if (rk === 1 && g.lastDribbleFrame > 12) { playDribble(); g.lastDribbleFrame = 0; }
           });
         }
 
-        // Player-player collisions
-        const allPlayers = [p];
-        g.remotePlayers.forEach((rp) => allPlayers.push(rp));
         for (let i = 0; i < allPlayers.length; i++) {
           for (let j = i + 1; j < allPlayers.length; j++) {
             resolveCircleCollision(allPlayers[i], PLAYER_RADIUS, allPlayers[j], PLAYER_RADIUS);
           }
         }
 
-        // Ball tick — host runs physics, non-host interpolates toward host target
         if (isHost) {
           const goal = tickBall(ball);
           if (goal && !g.pendingReset) {
@@ -1109,14 +1366,22 @@ gs.current.localMode = localMode;
             g.goalFlash = 60;
             g.lastGoalTeam = goal;
             g.pendingReset = true;
+            spawnGoalParticles(g.particles, ball.x, ball.y, scorer);
+            g.shakeFrames = 14;
+            g.slowMoFrames = 18;
+            playGoal();
+            hapticGoal();
           }
         } else if (g.ballTarget) {
-          // Predict position using host velocity + lerp toward host position
+          // Advance target with same physics as host so it stays current between updates
           const t = g.ballTarget;
-          ball.x += t.vx;
-          ball.y += t.vy;
-          ball.x += (t.x - ball.x) * 0.15;
-          ball.y += (t.y - ball.y) * 0.15;
+          t.x += t.vx;
+          t.y += t.vy;
+          t.vx *= BALL_FRICTION;
+          t.vy *= BALL_FRICTION;
+          // Smoothly lerp ball toward predicted target
+          ball.x += (t.x - ball.x) * 0.3;
+          ball.y += (t.y - ball.y) * 0.3;
           ball.vx = t.vx;
           ball.vy = t.vy;
         }
@@ -1124,7 +1389,11 @@ gs.current.localMode = localMode;
 
       // ── Broadcast ──
       const now = Date.now();
-      if (!localMode && now - g.lastBroadcast > BROADCAST_INTERVAL) {
+      if (isSpectator && !localMode && now - g.lastBroadcast > 2000) {
+        awareness.setLocalState({ spectator: true, _ts: now });
+        g.lastBroadcast = now;
+      }
+      if (!localMode && !isSpectator && now - g.lastBroadcast > BROADCAST_INTERVAL) {
         const state = {
           x: p.x,
           y: p.y,
@@ -1132,7 +1401,8 @@ gs.current.localMode = localMode;
           vy: p.vy,
           team,
           name: currentUser?.name,
-          kicking,
+          kicking: kickPower,
+          charging: kickHeld ? g.charge / CHARGE_MAX : 0,
         };
         if (isHost) {
           state.ball = { x: ball.x, y: ball.y, vx: ball.vx, vy: ball.vy };
@@ -1142,24 +1412,63 @@ gs.current.localMode = localMode;
           state.swapped = g.swapped;
           state.gameOver = g.gameOver;
           state.kickedOff = g.kickedOff;
+          state.goalFlash = g.goalFlash;
+          state.lastGoalTeam = g.lastGoalTeam;
+          state.goalCooldown = g.goalCooldown;
         }
+        state._ts = Date.now();
         awareness.setLocalState(state);
         g.lastBroadcast = now;
+      }
+
+      // ── Particles ──
+      tickParticles(g.particles);
+
+      // ── Slow-mo: skip every other physics frame for brief dramatic pause ──
+      if (g.slowMoFrames > 0) {
+        g.slowMoFrames--;
       }
 
       // ── Render ──
       const dpr = gs.current.dpr || 1;
       ctx.save();
       ctx.scale(dpr, dpr);
-      render(ctx, canvas, g, team, gs.current.rotated, dpr);
+      render(ctx, canvas, g, team || "spectator", gs.current.rotated, dpr);
       ctx.restore();
 
       animId = requestAnimationFrame(tick);
     };
 
     animId = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(animId);
+    return () => { cancelAnimationFrame(animId); };
   }, [team, awareness, currentUser, roomId, localMode]);
+
+  useEffect(() => {
+    const inMatchView = localMode || !!team;
+    if (!inMatchView) return;
+
+    const htmlStyle = document.documentElement.style;
+    const bodyStyle = document.body.style;
+
+    const prev = {
+      htmlOverflow: htmlStyle.overflow,
+      htmlOverscroll: htmlStyle.overscrollBehavior,
+      bodyOverflow: bodyStyle.overflow,
+      bodyOverscroll: bodyStyle.overscrollBehavior,
+    };
+
+    htmlStyle.overflow = "hidden";
+    htmlStyle.overscrollBehavior = "none";
+    bodyStyle.overflow = "hidden";
+    bodyStyle.overscrollBehavior = "none";
+
+    return () => {
+      htmlStyle.overflow = prev.htmlOverflow;
+      htmlStyle.overscrollBehavior = prev.htmlOverscroll;
+      bodyStyle.overflow = prev.bodyOverflow;
+      bodyStyle.overscrollBehavior = prev.bodyOverscroll;
+    };
+  }, [localMode, team]);
 
   if (!localMode && !currentUser) return null;
 
@@ -1308,6 +1617,21 @@ gs.current.localMode = localMode;
             Tap to copy — send it to friends so they join this room
           </span>
         </button>
+        <button
+          type="button"
+          onClick={() => joinTeam("spectator")}
+          style={{
+            padding: "10px 20px",
+            fontSize: 14,
+            color: "#888",
+            background: "none",
+            border: "1px solid rgba(255,255,255,0.12)",
+            borderRadius: 10,
+            cursor: "pointer",
+          }}
+        >
+          👁 Watch as spectator
+        </button>
       </div>
       <UrlCopiedToast show={copied} />
       </>
@@ -1316,8 +1640,27 @@ gs.current.localMode = localMode;
 
   return (
     <>
-      <canvas ref={canvasRef} style={{ display: "block", width: "100vw", height: "100vh", cursor: "none" }} />
-      {rotated && <TouchControls gs={gs} localMode={localMode} />}
+      <div
+        style={{
+          position: "fixed",
+          inset: 0,
+          overflow: "hidden",
+          overscrollBehavior: "none",
+          touchAction: "none",
+        }}
+      >
+        <canvas
+          ref={canvasRef}
+          style={{
+            display: "block",
+            width: "100%",
+            height: "100%",
+            cursor: "none",
+            touchAction: "none",
+          }}
+        />
+      </div>
+      {rotated && team !== "spectator" && <TouchControls gs={gs} localMode={localMode} />}
       <UrlCopiedToast show={copied} />
       {rotated && (
         <div style={{
@@ -1356,6 +1699,15 @@ gs.current.localMode = localMode;
               📋
             </button>
           )}
+          <button
+            onClick={() => { setMuted(!muted); setMutedState(!muted); }}
+            style={{
+              background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.3)",
+              borderRadius: 6, color: "#fff", fontSize: 14, padding: "6px 8px", cursor: "pointer",
+            }}
+          >
+            {muted ? "🔇" : "🔊"}
+          </button>
         </div>
       )}
       {gameOver && (

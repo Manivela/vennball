@@ -24,7 +24,7 @@ export const PLAYER_FRICTION = 0.88;
 export const PLAYER_ACCEL_MOBILE = 0.28;
 export const BALL_FRICTION = 0.986;
 export const KICK_FORCE = 7;
-export const KICK_RANGE = PLAYER_RADIUS + BALL_RADIUS + 8;
+export const KICK_RANGE = PLAYER_RADIUS + BALL_RADIUS + 18;
 export const BALL_MAX_SPEED = 14;
 export const COLLISION_RESTITUTION = 0.7;
 

@@ -1,24 +1,37 @@
 import { chromium } from "playwright";
 
+function nonEmpty(value) {
+  if (value === undefined || value === null) return "";
+  return String(value).trim();
+}
+
+function parseBool(value, defaultValue) {
+  const normalized = nonEmpty(value).toLowerCase();
+  if (!normalized) return defaultValue;
+  if (["1", "true", "yes", "y", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "n", "off"].includes(normalized)) return false;
+  return defaultValue;
+}
+
 function parseArgs(argv) {
   const config = {
-    url: process.env.STRESS_URL || "http://localhost:5173",
-    room: process.env.STRESS_ROOM || `stress-${Date.now().toString(36)}`,
+    url: nonEmpty(process.env.STRESS_URL) || "https://vennball.vercel.app",
+    room: nonEmpty(process.env.STRESS_ROOM) || "stress-test",
     players: Number(process.env.STRESS_PLAYERS || 12),
-    durationSec: Number(process.env.STRESS_DURATION || 120),
+    durationSec: Number(process.env.STRESS_DURATION || 30),
     intervalMs: Number(process.env.STRESS_SAMPLE_MS || 1000),
-    headless: process.env.STRESS_HEADLESS !== "false",
+    headless: parseBool(process.env.STRESS_HEADLESS, true),
   };
 
   for (const arg of argv) {
     if (!arg.startsWith("--")) continue;
     const [key, value] = arg.slice(2).split("=");
-    if (key === "url" && value) config.url = value;
-    if (key === "room" && value) config.room = value;
+    if (key === "url" && nonEmpty(value)) config.url = nonEmpty(value);
+    if (key === "room" && nonEmpty(value)) config.room = nonEmpty(value);
     if (key === "players" && value) config.players = Number(value);
     if (key === "duration" && value) config.durationSec = Number(value);
     if (key === "sample-ms" && value) config.intervalMs = Number(value);
-    if (key === "headless" && value) config.headless = value !== "false";
+    if (key === "headless") config.headless = parseBool(value, true);
   }
 
   return config;
@@ -50,7 +63,13 @@ async function createPlayer(browser, index, config) {
   const joinUrl = `${config.url}/?name=${encodeURIComponent(name)}&room=${encodeURIComponent(config.room)}&team=${team}`;
 
   await page.addInitScript(() => {
-    window.__stress = { frameDeltas: [], lastFrameTs: 0 };
+    window.__stress = {
+      frameDeltas: [],
+      lastFrameTs: 0,
+      ballJumps: [],
+      ballCorrections: [],
+      prevBall: null,
+    };
     const loop = (ts) => {
       const s = window.__stress;
       if (s.lastFrameTs) {
@@ -60,6 +79,28 @@ async function createPlayer(browser, index, config) {
           if (s.frameDeltas.length > 600) s.frameDeltas.shift();
         }
       }
+
+      const g = window.__game;
+      const ball = g?.ball;
+      if (ball && Number.isFinite(ball.x) && Number.isFinite(ball.y)) {
+        if (s.prevBall) {
+          const jump = Math.hypot(ball.x - s.prevBall.x, ball.y - s.prevBall.y);
+          const predictedX = s.prevBall.x + (s.prevBall.vx || 0);
+          const predictedY = s.prevBall.y + (s.prevBall.vy || 0);
+          const correction = Math.hypot(ball.x - predictedX, ball.y - predictedY);
+          s.ballJumps.push(jump);
+          s.ballCorrections.push(correction);
+          if (s.ballJumps.length > 600) s.ballJumps.shift();
+          if (s.ballCorrections.length > 600) s.ballCorrections.shift();
+        }
+        s.prevBall = {
+          x: ball.x,
+          y: ball.y,
+          vx: ball.vx || 0,
+          vy: ball.vy || 0,
+        };
+      }
+
       s.lastFrameTs = ts;
       window.requestAnimationFrame(loop);
     };
@@ -129,11 +170,15 @@ async function samplePlayer(player) {
 
     const frameDeltas = Array.isArray(s?.frameDeltas) ? s.frameDeltas : [];
     const last120 = frameDeltas.slice(-120);
+    const ballJumps = Array.isArray(s?.ballJumps) ? s.ballJumps.slice(-180) : [];
+    const ballCorrections = Array.isArray(s?.ballCorrections) ? s.ballCorrections.slice(-180) : [];
 
     return {
       remoteCount,
       interpErrorAvg: remoteCount ? totalInterpError / remoteCount : 0,
       frameDeltas: last120,
+      ballJumps,
+      ballCorrections,
     };
   });
 }
@@ -175,6 +220,10 @@ async function main() {
     const remoteCounts = [];
     const interpErrors = [];
     const frameJitters = [];
+    const ballJumpP95s = [];
+    const ballJumpP99s = [];
+    const ballCorrectionP95s = [];
+    const ballSnapRates = [];
 
     while (Date.now() < stopAt) {
       const samples = await Promise.all(players.map((player) => samplePlayer(player)));
@@ -183,12 +232,25 @@ async function main() {
         const avgRemote = mean(valid.map((sample) => sample.remoteCount));
         const avgInterpError = mean(valid.map((sample) => sample.interpErrorAvg));
         const allFrameDeltas = valid.flatMap((sample) => sample.frameDeltas || []);
+        const allBallJumps = valid.flatMap((sample) => sample.ballJumps || []);
+        const allBallCorrections = valid.flatMap((sample) => sample.ballCorrections || []);
         const frameP95 = percentile(allFrameDeltas, 95);
+        const ballJumpP95 = percentile(allBallJumps, 95);
+        const ballJumpP99 = percentile(allBallJumps, 99);
+        const ballCorrectionP95 = percentile(allBallCorrections, 95);
+        const snapThresholdPx = 18;
+        const snapRate = allBallCorrections.length
+          ? allBallCorrections.filter((value) => value > snapThresholdPx).length / allBallCorrections.length
+          : 0;
 
-        perTick.push({ avgRemote, avgInterpError, frameP95 });
+        perTick.push({ avgRemote, avgInterpError, frameP95, ballJumpP95, ballCorrectionP95, snapRate });
         remoteCounts.push(avgRemote);
         interpErrors.push(avgInterpError);
         frameJitters.push(frameP95);
+        ballJumpP95s.push(ballJumpP95);
+        ballJumpP99s.push(ballJumpP99);
+        ballCorrectionP95s.push(ballCorrectionP95);
+        ballSnapRates.push(snapRate);
       }
 
       await sleep(config.intervalMs);
@@ -205,6 +267,13 @@ async function main() {
       p95InterpErrorPx: percentile(interpErrors, 95),
       avgFrameDeltaMs: mean(frameJitters),
       p95FrameDeltaMs: percentile(frameJitters, 95),
+      avgBallJumpP95Px: mean(ballJumpP95s),
+      p95BallJumpP95Px: percentile(ballJumpP95s, 95),
+      p95BallJumpP99Px: percentile(ballJumpP99s, 95),
+      avgBallCorrectionP95Px: mean(ballCorrectionP95s),
+      p95BallCorrectionP95Px: percentile(ballCorrectionP95s, 95),
+      avgBallSnapRate: mean(ballSnapRates),
+      p95BallSnapRate: percentile(ballSnapRates, 95),
       samples: perTick.length,
     };
 
@@ -215,6 +284,8 @@ async function main() {
     console.log("\nHeuristic result:");
     if (visibilityRatio < 0.7) {
       console.log("  ❌ Peer visibility is low (<70%). Check signaling connectivity and NAT reachability.");
+    } else if (finalReport.p95BallCorrectionP95Px > 18 || finalReport.p95BallSnapRate > 0.08) {
+      console.log("  ⚠️ Ball sync jitter detected (frequent correction snaps/teleports).");
     } else if (finalReport.p95FrameDeltaMs > 35 || finalReport.p95InterpErrorPx > 30) {
       console.log("  ⚠️ Connectivity mostly works, but smoothness is weak (high frame/interpolation jitter).");
     } else {
