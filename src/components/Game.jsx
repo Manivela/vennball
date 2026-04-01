@@ -1299,9 +1299,9 @@ gs.current.localMode = localMode;
       const ball = g.ball;
 
       // ── Determine host (cached — updated by awareness listener) ──
-      const localID = awareness.clientID;
+      const localID = awareness ? awareness.clientID : (serverConn?.clientID ?? 0);
       const hostID = g.cachedHostID ?? localID;
-      const isHost = localMode || (localID === hostID && !g.spectator);
+      const isHost = localMode || (!serverMode && localID === hostID && !g.spectator);
       const isSpectator = g.spectator;
 
       let ax = 0, ay = 0;
