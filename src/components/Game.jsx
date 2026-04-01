@@ -1483,15 +1483,13 @@ gs.current.localMode = localMode;
           if (g.lastDribbleFrame > 12) { playDribble(); g.lastDribbleFrame = 0; }
         }
 
-        // All clients run remote player ball collisions (prevents ball phasing through players).
-        // Host uses reported position for accuracy; clients use visual position.
+        // All clients run remote player ball collisions using REPORTED position (targetX/Y).
+        // Both host and clients use the same position → identical collision results → no divergence.
         g.remotePlayers.forEach((rp) => {
           const rpTeam = rp.team || team;
           const rpKickPower = typeof rp.kicking === "number" ? rp.kicking : (rp.kicking ? KICK_MIN_MULT : 0);
-          let useX = rp.x, useY = rp.y;
-          if (isHost && rp.targetX !== undefined) { useX = rp.targetX; useY = rp.targetY; }
           const visX = rp.x, visY = rp.y;
-          rp.x = useX; rp.y = useY;
+          if (rp.targetX !== undefined) { rp.x = rp.targetX; rp.y = rp.targetY; }
           const rk = playerBallCollision(rp, ball, rpKickPower, getTeammates(rp, rpTeam));
           rp.x = visX; rp.y = visY;
           if (rk === 2) { rp.kicking = 0; if (g.lastKickFrame > 8) { playKick(); hapticKick(); g.lastKickFrame = 0; } }
