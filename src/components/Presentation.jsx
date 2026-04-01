@@ -465,7 +465,8 @@ export default function Presentation() {
               {[
                 { val: "1", label: "Developer" },
                 { val: "3", label: "AI Agents" },
-                { val: "6h", label: "Build Time" },
+                { val: "4h", label: "Building" },
+                { val: "4h", label: "Optimization" },
                 { val: "~1500", label: "Lines of Code" },
                 { val: "$80", label: "Total AI Cost" },
                 { val: "0", label: "Servers Needed" },
